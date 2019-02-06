@@ -192,7 +192,7 @@ if args.dataset.startswith('cifar'):
 elif args.dataset == 'tiny_imagenet':
     trainloader, testloader = tiny_imagenet.get_data(
         64, args.data_dir, val_only=args.testOnly, batch_size=args.batch_size,
-        class_sz=args.trainsize, seed=args.seed, distributed=(args.num_gpus>1))
+        trainsize=args.trainsize, seed=args.seed, distributed=(args.num_gpus>1))
 
 # Test only option
 if args.testOnly:

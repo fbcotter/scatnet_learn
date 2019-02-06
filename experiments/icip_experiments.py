@@ -41,7 +41,7 @@ It is recommended to use tensorboard to view the run results.
 ''', formatter_class=argparse.RawTextHelpFormatter)
 
 parser.add_argument('--exp_dir', type=str,
-                    default='/scratch/fbc23/data/icip19_final/',
+                    default='/scratch/fbc23/data/icip19_final3/',
                     help='Output directory for the experiment')
 parser.add_argument('--train_sizes', type=int, nargs='+',
                     default=[1000, 2000, 5000, 10000, 20000, 50000],
@@ -56,83 +56,46 @@ parser.add_argument('--cpu', action='store_true', help='Run only on cpu')
 
 
 runs = [
-    ('cifar10', 10000, 'A'),
-    ('cifar10', 10000, 'B'),
-    ('cifar10', 10000, 'C'),
-    ('cifar10', 10000, 'D'),
-    ('cifar10', 10000, 'E'),
-    ('cifar10', 10000, 'F'),
-    ('cifar10', 10000, 'G'),
-    ('cifar10', 10000, 'H'),
-    ('cifar10', 10000, 'I'),
-    ('cifar10', 10000, 'J'),
-    ('cifar10', 50000, 'A'),
-    ('cifar10', 50000, 'B'),
-    ('cifar10', 50000, 'C'),
-    ('cifar10', 50000, 'D'),
-    ('cifar10', 50000, 'E'),
-    ('cifar10', 50000, 'F'),
-    ('cifar10', 50000, 'G'),
-    ('cifar10', 50000, 'H'),
-    ('cifar10', 50000, 'I'),
-    ('cifar10', 50000, 'J'),
-    ('cifar100', 10000, 'A'),
-    ('cifar100', 10000, 'B'),
-    ('cifar100', 10000, 'C'),
-    ('cifar100', 10000, 'D'),
-    ('cifar100', 10000, 'E'),
-    ('cifar100', 10000, 'F'),
-    ('cifar100', 10000, 'G'),
-    ('cifar100', 10000, 'H'),
-    ('cifar100', 10000, 'I'),
-    ('cifar100', 10000, 'J'),
-    ('cifar100', 50000, 'A'),
-    ('cifar100', 50000, 'B'),
-    ('cifar100', 50000, 'C'),
-    ('cifar100', 50000, 'D'),
-    ('cifar100', 50000, 'E'),
-    ('cifar100', 50000, 'F'),
-    ('cifar100', 50000, 'G'),
-    ('cifar100', 50000, 'H'),
-    ('cifar100', 50000, 'I'),
-    ('cifar100', 50000, 'J'),
-    ('cifar100', 50000, 'K'),
-    ('cifar100', 50000, 'L'),
-    ('cifar100', 50000, 'M'),
-    ('cifar100', 50000, 'N'),
-    ('tiny_imagenet', 100000, 'A'),
-    ('tiny_imagenet', 100000, 'B'),
-    ('tiny_imagenet', 100000, 'C'),
-    ('tiny_imagenet', 100000, 'D'),
-    ('tiny_imagenet', 100000, 'E'),
-    ('tiny_imagenet', 100000, 'F'),
-    ('tiny_imagenet', 100000, 'G'),
-    ('tiny_imagenet', 100000, 'H'),
-    ('tiny_imagenet', 100000, 'I'),
-    ('tiny_imagenet', 100000, 'J'),
+    ('tiny_imagenet', 20000, 'A'),
+    ('tiny_imagenet', 20000, 'B'),
+    ('tiny_imagenet', 20000, 'C'),
+    ('tiny_imagenet', 20000, 'D'),
+    ('tiny_imagenet', 20000, 'E'),
+    ('tiny_imagenet', 20000, 'F'),
+    ('tiny_imagenet', 20000, 'G'),
+    ('tiny_imagenet', 20000, 'H'),
+    ('tiny_imagenet', 20000, 'I'),
+    ('tiny_imagenet', 20000, 'J'),
+    ('tiny_imagenet', 20000, 'K'),
+    ('tiny_imagenet', 20000, 'L'),
+    ('tiny_imagenet', 20000, 'M'),
+    ('tiny_imagenet', 20000, 'N'),
 ]
 
 
 def main(args):
     for d, ts, c in runs:
-        conv = 'invariantj1'
         lr = 0.8
         mom = 0.85
         outdir = os.path.join(args.exp_dir, d, str(ts), c)
         os.makedirs(outdir, exist_ok=True)
         stdout_file = open(os.path.join(outdir, 'stdout'), 'w')
         if d == 'tiny_imagenet':
-            wd = 8e-5
+            wd = 5e-5
             steps = ['18', '30', '40']
             epochs = '45'
+            data_dir = '/scratch/share/Tiny_ImageNet'
+            eval_period = '1'
         else:
             wd = 1e-4
             steps = ['60', '80', '100']
             epochs = '120'
-        # gpus = [str(x) for x in range(4, 8)]
+            data_dir = '/scratch/share/cifar'
+            eval_period = '2'
+        gpus = [str(x) for x in range(5)]
         cmd = ['python', '../main.py', outdir,
                '--trainsize', str(ts),
-               '--eval_period', '2',
+               '--eval_period', eval_period,
                '--no_comment',
                '--optim', 'sgd',
                '--lr', str(lr),
@@ -140,20 +103,22 @@ def main(args):
                '--wd', str(wd),
                '--steps', *steps,
                '--epochs', epochs,
+               '--gpu_select', *gpus,
                '--exist_ok',
-               '--dataset', d]
-        print('Running {} group, trainsize: {}\tl:{},\t'
-              'c:{},\t,lr:{},\tm:{}'.format(
-                conv, ts, l, c, lr, mom))
+               '--dataset', d,
+               '--data_dir', data_dir,
+               '--type', c]
+        print('Running {} {}, group {}'.format(
+                d, ts, c))
 
         if args.cpu:
             subprocess.run(cmd, stdout=stdout_file)
         else:
             # Only look at the last 4 gpus for the moment
-            num_gpus = np.array(get_free_gpus())[4:].sum()
+            num_gpus = np.array(get_free_gpus())[:5].sum()
             while num_gpus < 1:
                 time.sleep(10)
-                num_gpus = np.array(get_free_gpus())[4:].sum()
+                num_gpus = np.array(get_free_gpus())[:5].sum()
             subprocess.Popen(cmd, stdout=stdout_file)
             # Give the processes time to start
             time.sleep(20)

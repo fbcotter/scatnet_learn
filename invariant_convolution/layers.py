@@ -121,7 +121,7 @@ class InvariantLayerj1(nn.Module):
         # self.mag = LogMagReshapeLearn(6*C, b=0.01, ri_dim=2)
         self.bp1 = nn.Conv2d(C*6, F, 1)
         self.lp1 = nn.Conv2d(C, F, 1, stride=2)
-        self.bn = nn.BatchNorm2d(F)
+        # self.bn = nn.BatchNorm2d(F)
         assert abs(stride) == 1 or stride == 2, "Limited resampling at the moment"
         self.stride = stride
 
@@ -132,8 +132,6 @@ class InvariantLayerj1(nn.Module):
         yl, (yh,) = self.xfm(x)
         yhm = self.mag(yh)
         y = self.bp1(yhm)
-        # n, _, c, h, w = yhm.shape
-        # y = self.bp1(yhm.view(n, 6*c, h, w))
         y = y + self.lp1(yl)
         # y = func.relu(self.bn(y))
         y = func.relu(y)

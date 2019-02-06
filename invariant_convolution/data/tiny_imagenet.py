@@ -4,10 +4,24 @@ import os
 import sys
 import random
 import torch.utils.data
+from shutil import copyfile
+
+
+def subsample(data_dir, sz):
+    dest = os.path.join(data_dir, 'train{}'.format(sz))
+    os.makedirs(dest)
+    classes = os.listdir(os.path.join(data_dir, 'train'))
+    for c in classes:
+        if os.path.isdir(os.path.join(data_dir, 'train', c)):
+            os.makedirs(os.path.join(dest, c))
+            files = os.listdir(os.path.join(data_dir, 'train', c, 'images'))
+            for i in range(sz):
+                os.symlink(os.path.join(data_dir, 'train', c, 'images', files[i]),
+                           os.path.join(dest, c, files[i]))
 
 
 def get_data(in_size, data_dir, val_only=False, batch_size=128,
-             class_sz=-1, seed=random.randint(0, 10000), perturb=True,
+             trainsize=-1, seed=random.randint(0, 10000), perturb=True,
              num_workers=4, iter_size=1, distributed=False):
     """ Provides a pytorch loader to load in imagenet
     Args:
@@ -29,7 +43,6 @@ def get_data(in_size, data_dir, val_only=False, batch_size=128,
         random.seed(seed+id)
         np.random.seed(seed+id)
 
-    traindir = os.path.join(data_dir, 'train')
     valdir = os.path.join(data_dir, 'val2')
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                      std=[0.229, 0.224, 0.225])
@@ -55,6 +68,14 @@ def get_data(in_size, data_dir, val_only=False, batch_size=128,
     if val_only:
         trainloader = None
     else:
+        if 0 < trainsize < 100000:
+            class_sz = trainsize // 200
+            traindir = os.path.join(data_dir, 'train{}'.format(class_sz))
+        else:
+            traindir = os.path.join(data_dir, 'train')
+        if not os.path.exists(traindir):
+            subsample(data_dir, class_sz)
+            assert os.path.exists(traindir)
         # Get the train loader
         if perturb:
             transform_train = transforms.Compose([
