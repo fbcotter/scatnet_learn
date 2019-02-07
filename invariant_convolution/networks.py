@@ -47,14 +47,16 @@ class MyModule(nn.Module):
                     nn.Conv2d(C, F, 5, padding=2, stride=stride),
                     nn.BatchNorm2d(F),
                     nn.ReLU())
+        elif block == 'conv1x1':
+            def blk(C, F, stride):
+                return nn.Sequential(
+                    nn.Conv2d(C, F, 1, padding=0, stride=stride),
+                    nn.BatchNorm2d(F),
+                    nn.ReLU())
         elif block == 'invariantj1':
             blk = l.InvariantLayerj1
         elif block == 'invariantj1c':
             blk = l.InvariantCompressLayerj1
-        elif block == 'invariantj2':
-            pass
-        elif block == 'invariantj2c':
-            pass
         elif block == 'residual':
             blk = l.ResNetBlock
         else:
@@ -224,6 +226,7 @@ class ScatNet(MyModule):
     def __init__(self, dataset, channels, reg='l2', wd=1e-4, wd_fc=None):
         super().__init__(dataset)
         conv = self.get_block('conv3x3')
+        conv1 = self.get_block('conv1x1')
         inv = self.get_block('invariantj1')
         scat = l.ScatLayer
         C = channels
@@ -233,14 +236,15 @@ class ScatNet(MyModule):
                 num_classes = 10
             else:
                 num_classes = 100
+            C1 = 3
             # Network is 3 stages of convolution
             self.net = nn.Sequential(OrderedDict([
-                ('proj', conv(3, 16, 1)),
-                ('scat1', scat(16, 2, learn=False, resid=False)),
-                ('scat2', scat(7*16, 2, learn=False, resid=False)),
+                # ('proj', conv(3, C1, 1)),
+                ('scat1', scat(C1, 2, learn=False, resid=False)),
+                ('scat2', scat(7*C1, 2, learn=False, resid=False)),
                 # ('pool1', nn.MaxPool2d(2)),
-                ('conv2_1', conv(49*16, 2*C, 1)),
-                # ('conv2_2', conv(2*C, 2*C, 1)),
+                ('conv2_1', conv(49*C1, 2*C, 1)),
+                ('conv2_2', conv(2*C, 2*C, 1)),
                 # ('pool2', nn.MaxPool2d(2)),
                 ('conv3_1', conv(2*C, 4*C, 1)),
                 ('conv3_2', conv(4*C, 4*C, 1)),
@@ -250,14 +254,18 @@ class ScatNet(MyModule):
         elif dataset == 'tiny_imagenet':
             num_classes = 200
             # Network is 3 stages of convolution
+            C1 = 16
             self.net = nn.Sequential(OrderedDict([
-                ('scat1', scat(3, 2, learn=True, resid=True)),
-                ('scat2', scat(7*3, 2, learn=True, resid=True)),
+                ('proj', conv(3, C1, 1)),
+                ('scat1', scat(C1, 2, learn=False, resid=False)),
+                ('scat2', scat(7*C1, 2, learn=False, resid=False)),
                 # ('pool1', nn.MaxPool2d(2)),
-                ('conv3_1', conv(49*3, 4*C, 1)),
+                ('conv2_1', conv(49*C1, 2*C, 1)),
+                ('conv2_2', conv(2*C, 4*C, 1)),
+                # ('pool2', nn.MaxPool2d(2)),
+                ('conv3_1', conv(4*C, 4*C, 1)),
                 ('conv3_2', conv(4*C, 4*C, 1)),
-                ('pool3', nn.MaxPool2d(2)),
-                ('conv4_1', conv(4*C, 8*C, 1)),
+                ('conv4_1', conv(4*C, 8*C, 2)),
                 ('conv4_2', conv(8*C, 8*C, 1)),
             ]))
             self.avg = nn.AvgPool2d(8)
