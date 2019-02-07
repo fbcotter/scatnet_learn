@@ -77,13 +77,13 @@ def main(args):
     for d, ts, c in runs:
         lr = 0.8
         mom = 0.85
-        outdir = os.path.join(args.exp_dir, d, str(ts), c)
+        outdir = os.path.join(args.exp_dir, d, str(ts), 'Z' + c)
         os.makedirs(outdir, exist_ok=True)
         stdout_file = open(os.path.join(outdir, 'stdout'), 'w')
         if d == 'tiny_imagenet':
             wd = 5e-5
-            steps = ['18', '30', '40']
-            epochs = '45'
+            steps = ['25', '35', '45']
+            epochs = '50'
             data_dir = '/scratch/share/Tiny_ImageNet'
             eval_period = '1'
         else:

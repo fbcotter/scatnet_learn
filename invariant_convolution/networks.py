@@ -236,11 +236,11 @@ class ScatNet(MyModule):
             # Network is 3 stages of convolution
             self.net = nn.Sequential(OrderedDict([
                 ('proj', conv(3, 16, 1)),
-                ('scat1', scat(16, 2, learn=True, resid=False)),
-                ('scat2', scat(7*16, 2, learn=True, resid=False)),
+                ('scat1', scat(16, 2, learn=False, resid=False)),
+                ('scat2', scat(7*16, 2, learn=False, resid=False)),
                 # ('pool1', nn.MaxPool2d(2)),
                 ('conv2_1', conv(49*16, 2*C, 1)),
-                ('conv2_2', conv(2*C, 2*C, 1)),
+                # ('conv2_2', conv(2*C, 2*C, 1)),
                 # ('pool2', nn.MaxPool2d(2)),
                 ('conv3_1', conv(2*C, 4*C, 1)),
                 ('conv3_2', conv(4*C, 4*C, 1)),

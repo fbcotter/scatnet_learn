@@ -164,9 +164,9 @@ else:
     #                   args.channels_per_scale, reg=args.reg, wd=args.wd)
     # net = MixedNet(args.dataset, args.channels_per_scale, reg=args.reg,
     #                wd=args.wd)
-    # net = ScatNet(args.dataset, args.channels_per_scale, reg=args.reg,
-    #               wd=args.wd)
-    net = MixedNet2(args.dataset, args.type, reg=args.reg, wd=args.wd)
+    net = ScatNet(args.dataset, args.channels_per_scale, reg=args.reg,
+                  wd=args.wd)
+    # net = MixedNet2(args.dataset, args.type, reg=args.reg, wd=args.wd)
     net.init()
     file_name = args.conv_layer
     save_experiment_info(args.exp_dir, args.seed,
