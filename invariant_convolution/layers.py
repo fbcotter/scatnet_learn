@@ -182,7 +182,7 @@ class InvariantCompressLayerj1(nn.Module):
 
 
 class ScatLayer(nn.Module):
-    def __init__(self, C, stride=1, learn=True, resid=True):
+    def __init__(self, C, stride=1, learn=False, resid=False, p=0.):
         super().__init__()
         self.xfm = DTCWTForward(J=1, o_dim=1, ri_dim=2)
         self.mag = MagReshape(b=0.0001, ri_dim=2)
@@ -190,7 +190,10 @@ class ScatLayer(nn.Module):
         self.resid = resid
         if learn:
             self.gain = nn.Conv2d(C*7, C*7, 1)
-            self.bn = nn.BatchNorm2d(C*7)
+            if p > 0:
+                self.drop = nn.Dropout(p=p)
+            else:
+                self.drop = None
         assert abs(stride) == 1 or stride == 2, "Limited resampling at the moment"
         self.stride = stride
 
@@ -200,9 +203,11 @@ class ScatLayer(nn.Module):
         y = torch.cat((yl[:, :, ::2, ::2], yhm), dim=1)
         if self.learn:
             if self.resid:
-                y = y + func.relu(self.bn(self.gain(y)))
+                y = y + func.relu(self.gain(y))
             else:
-                y = func.relu(self.bn(self.gain(y)))
+                y = func.relu(self.gain(y))
+            if self.drop is not None:
+                y = self.drop(y)
 
         if self.stride == 1:
             y = func.interpolate(y, scale_factor=2, mode='bilinear',
