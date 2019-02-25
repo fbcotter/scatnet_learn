@@ -72,7 +72,7 @@ parser.add_argument('--verbose', action='store_true',
 parser.add_argument('--gpu_select', default=None, type=int, nargs='+',
                     help='list of gpus on which to run exps')
 parser.add_argument('--type', default='A', type=str,
-                    help='list of gpus on which to run exps')
+                    help='Model type to build')
 
 # Core hyperparameters
 parser.add_argument('--lr', default=0.1, type=float,
