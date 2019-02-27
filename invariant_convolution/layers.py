@@ -32,14 +32,20 @@ class SmoothMagFn(torch.autograd.Function):
 
 
 class MagReshape(nn.Module):
-    def __init__(self, b=0.01, ri_dim=-1):
+    def __init__(self, b=0.01, o_dim=1, ri_dim=-1):
         super().__init__()
         self.b = b
-        self.ri_dim = ri_dim
+        self.ri_dim = ri_dim % 6
+        assert 1 <= o_dim <= 2, "Restricted support for the orientation " \
+                                "dimension"
+        self.o_dim = o_dim
 
     def forward(self, x):
         mag = SmoothMagFn.apply(x, self.b, self.ri_dim)
-        b, _, c, h, w = mag.shape
+        if self.o_dim == 1:
+            b, _, c, h, w = mag.shape
+        else:
+            b, c, _, h, w = mag.shape
         return mag.view(b, 6*c, h, w)
 
 
@@ -111,16 +117,16 @@ class InvariantLayerj1(nn.Module):
     As for noise, the wavelet coefficients are energy preserving, so there
     will be no magnification.
     """
-    def __init__(self, C, F, stride=1):
+    def __init__(self, C, F, stride=1, p=0.):
         super().__init__()
         self.xfm = DTCWTForward(J=1, o_dim=1, ri_dim=2)
-        self.mag = MagReshape(b=0.0001, ri_dim=2)
-        # self.mag = Mag2Reshape(ri_dim=2)
-        # self.mag = RealOnly(ri_dim=2)
-        # self.mag = LogMagReshape(b=0.01, ri_dim=2)
-        # self.mag = LogMagReshapeLearn(6*C, b=0.01, ri_dim=2)
-        self.bp1 = nn.Conv2d(C*6, F, 1)
-        self.lp1 = nn.Conv2d(C, F, 1, stride=2)
+        self.mag = MagReshape(b=0.0001, o_dim=1, ri_dim=2)
+        self.gain = nn.Conv2d(C*7, F, 1)
+        self.avg = nn.AvgPool2d(2)
+        if p > 0:
+            self.drop = nn.Dropout(p=p)
+        else:
+            self.drop = None
         # self.bn = nn.BatchNorm2d(F)
         assert abs(stride) == 1 or stride == 2, "Limited resampling at the moment"
         self.stride = stride
@@ -130,15 +136,23 @@ class InvariantLayerj1(nn.Module):
             x = func.interpolate(x, scale_factor=2, mode='bilinear',
                                  align_corners=False)
         yl, (yh,) = self.xfm(x)
-        yhm = self.mag(yh)
-        y = self.bp1(yhm)
-        y = y + self.lp1(yl)
-        # y = func.relu(self.bn(y))
+
+        # Take the magnitude
+        U = self.mag(yh)
+        # Concatenate (Multiply lowpass by 2 to keep the DC gain 1)
+        z = torch.cat((2*self.avg(yl), U), dim=1)
+        y = self.gain(z)
+        if self.drop is not None:
+            y = self.drop(y)
         y = func.relu(y)
         if self.stride == 1:
             y = func.interpolate(y, scale_factor=2, mode='bilinear',
                                  align_corners=False)
         return y
+
+    def init(self):
+        if self.learn:
+            init.xavier_uniform_(self.gain.weight, gain=sqrt(2))
 
 
 class InvariantCompressLayerj1(nn.Module):
@@ -182,12 +196,20 @@ class InvariantCompressLayerj1(nn.Module):
 
 
 class ScatLayer(nn.Module):
-    def __init__(self, C, stride=1, learn=False, resid=False, p=0.):
+    """ Do a single order scattering of the input, potentially with learning
+    afterwards.
+
+    If the input has C channels, the output will have 7*C channels, the first C
+    of which are the lowpasses, then the next C are the 15 degree wavelets,
+    and so on.
+    """
+    def __init__(self, C, stride=2, learn=False, resid=False, p=0.):
         super().__init__()
-        self.xfm = DTCWTForward(J=1, o_dim=1, ri_dim=2)
-        self.mag = MagReshape(b=0.0001, ri_dim=2)
+        self.xfm = DTCWTForward(J=1, o_dim=1, ri_dim=3)
+        self.mag = MagReshape(b=0.0001, o_dim=1, ri_dim=3)
         self.learn = learn
         self.resid = resid
+        self.avg = nn.AvgPool2d(2)
         if learn:
             self.gain = nn.Conv2d(C*7, C*7, 1)
             if p > 0:
@@ -200,7 +222,8 @@ class ScatLayer(nn.Module):
     def forward(self, x):
         yl, (yh,) = self.xfm(x)
         yhm = self.mag(yh)
-        y = torch.cat((yl[:, :, ::2, ::2], yhm), dim=1)
+        # Multiply by 2 to keep the DC gain constant
+        y = torch.cat((2*self.avg(yl), yhm), dim=1)
         if self.learn:
             if self.resid:
                 y = y + func.relu(self.gain(y))
@@ -217,7 +240,7 @@ class ScatLayer(nn.Module):
     def init(self):
         if self.learn:
             if self.resid:
-                init.xavier_uniform_(self.net.scat1.weight, gain=1)
+                init.xavier_uniform_(self.gain.weight, gain=.2)
             else:
-                init.xavier_uniform_(self.net.scat1.weight, gain=1.5)
+                init.xavier_uniform_(self.gain.weight, gain=1)
 
