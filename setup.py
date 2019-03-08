@@ -12,7 +12,7 @@ def read(fname):
 
 # Read metadata from version file
 def get_version():
-    with open("invariant_convolution/__init__.py") as f:
+    with open("scatnet_learn/__init__.py") as f:
         for line in f:
             if line.startswith("__version__"):
                 return line[15:-2]
@@ -20,14 +20,14 @@ def get_version():
 
 
 setup(
-    name='invariant_convolution',
+    name='scatnet_learn',
     author="Fergal Cotter",
     version=get_version(),
     author_email="fbc23@cam.ac.uk",
     description=("Wavelet based image classifier for cifar datasets"),
     license="MIT",
     keywords="wavelet, complex wavelet, DT-CWT, tensorflow, cifar, classifier",
-    url="https://github.com/fbcotter/invariant_convolution",
+    url="https://github.com/fbcotter/scatnet_learn",
     packages=find_packages(exclude=["tests.*", "tests"]),
     long_description=read('README.rst'),
     classifiers=[
