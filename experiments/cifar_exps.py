@@ -1,6 +1,6 @@
 """
 This script allows you to run a host of tests on the invariant layer and
-slightly different variants of it on MNIST.
+slightly different variants of it on CIFAR.
 """
 import argparse
 import os
@@ -36,11 +36,18 @@ parser.add_argument('--trainsize', default=-1, type=int,
                     help='size of training set')
 parser.add_argument('--no-comment', action='store_true',
                     help='Turns off prompt to enter comments about run.')
+parser.add_argument('--nsamples', type=int, default=0,
+                    help='The number of runs to test.')
 parser.add_argument('--exist-ok', action='store_true',
                     help='If true, is ok if output directory already exists')
 parser.add_argument('--epochs', default=120, type=int, help='num epochs')
+parser.add_argument('--cpu', action='store_true', help='Do not run on gpus')
 parser.add_argument('--type', default=None, type=str, nargs='+',
-                    help='Model type(s) to build')
+                    help='''Model type(s) to build. If left blank, will run 14
+networks consisting of those defined by the dictionary "nets" (0, 1, or 2
+invariant layers at different depths). Can also specify to run "nets1" or
+"nets2", which swaps out the invariant layers for other iterations.
+Alternatively can directly specify the layer name, e.g. "invA", or "invB2".''')
 
 # Core hyperparameters
 parser.add_argument('--reg', default='l2', type=str, help='regularization term')
@@ -106,7 +113,7 @@ class MyModule(nn.Module):
         elif block == 'invariantj1_3x3':
             blk = lambda C, F, s: InvariantLayerj1(C, F, s, k=3)
         elif block == 'invariantj1_impulse':
-            blk = lambda C, F, s: InvariantLayerj1(C, F, s, k=1, alpha='impulse')
+            blk = lambda C, F, s: InvariantLayerj1(C, F, s, alpha='impulse')
         else:
             raise ValueError("Unknown block type {}".format(block))
         return blk
@@ -160,38 +167,77 @@ class MyModule(nn.Module):
 
         return func.log_softmax(out, dim=-1)
 
+
 # Define the options of networks. The 4 parameters are:
 # (layer type, input channels, output channels, stride)
+#
+# The dictionary 'nets' has 14 different layouts of vgg nets networks with 0,
+# 1 or 2 invariant layers at different depths.
+# The dicionary 'nets2' is the same as 'nets' except we change the invariant
+# layer for an invariant layer with random shifts
+# The dicionary 'nets3' is the same as 'nets' except we change the invariant
+# layer for an invariant layer with a 3x3 convolution
 C = 64
-style = {
-    'A': [('conv', 3, C, 1), ('conv', C, C, 1), ('conv', C, 2*C, 2),
-          ('conv', 2*C, 2*C, 1), ('conv', 2*C, 4*C, 2), ('conv', 4*C, 4*C, 1)],
-    'B': [('inv', 3, C, 1), ('conv', C, C, 1), ('conv', C, 2*C, 2),
-          ('conv', 2*C, 2*C, 1), ('conv', 2*C, 4*C, 2), ('conv', 4*C, 4*C, 1)],
-    'C': [('conv', 3, C, 1), ('inv', C, C, 2), ('conv', C, 2*C, 1),
-          ('conv', 2*C, 2*C, 1), ('conv', 2*C, 4*C, 2), ('conv', 4*C, 4*C, 1)],
-    'D': [('conv', 3, C, 1), ('conv', C, C, 1), ('inv', C, 2*C, 2),
-          ('conv', 2*C, 2*C, 1), ('conv', 2*C, 4*C, 2), ('conv', 4*C, 4*C, 1)],
-    'E': [('conv', 3, C, 1), ('conv', C, C, 1), ('conv', C, 2*C, 2),
-          ('inv', 2*C, 2*C, 2), ('conv', 2*C, 4*C, 1), ('conv', 4*C, 4*C, 1)],
-    'F': [('conv', 3, C, 1), ('conv', C, C, 1), ('conv', C, 2*C, 2),
-          ('conv', 2*C, 2*C, 1), ('inv', 2*C, 4*C, 2), ('conv', 4*C, 4*C, 1)],
-    'G': [('conv', 3, C, 1), ('conv', C, C, 1), ('conv', C, 2*C, 2),
-          ('conv', 2*C, 2*C, 1), ('conv', 2*C, 4*C, 2), ('inv', 4*C, 4*C, 1)],
-    'H': [('inv', 3, C, 1), ('inv', C, C, 2), ('conv', C, 2*C, 1),
-          ('conv', 2*C, 2*C, 1), ('conv', 2*C, 4*C, 2), ('conv', 4*C, 4*C, 1)],
-    'I': [('conv', 3, C, 1), ('inv', C, C, 2), ('inv', C, 2*C, 1),
-          ('conv', 2*C, 2*C, 1), ('conv', 2*C, 4*C, 2), ('conv', 4*C, 4*C, 1)],
-    'J': [('conv', 3, C, 1), ('conv', C, C, 1), ('inv', C, 2*C, 2),
-          ('inv', 2*C, 2*C, 2), ('conv', 2*C, 4*C, 1), ('conv', 4*C, 4*C, 1)],
-    'K': [('conv', 3, C, 1), ('conv', C, C, 1), ('conv', C, 2*C, 2),
-          ('inv', 2*C, 2*C, 2), ('inv', 2*C, 4*C, 1), ('conv', 4*C, 4*C, 1)],
-    'L': [('inv', 3, C, 1), ('conv', C, C, 1), ('inv', C, 2*C, 2),
-          ('conv', 2*C, 2*C, 1), ('conv', 2*C, 4*C, 2), ('conv', 4*C, 4*C, 1)],
-    'M': [('conv', 3, C, 1), ('inv', C, C, 2), ('conv', C, 2*C, 1),
-          ('inv', 2*C, 2*C, 2), ('conv', 2*C, 4*C, 1), ('conv', 4*C, 4*C, 1)],
-    'N': [('conv', 3, C, 1), ('conv', C, C, 1), ('inv', C, 2*C, 2),
-          ('conv', 2*C, 2*C, 1), ('inv', 2*C, 4*C, 2), ('conv', 4*C, 4*C, 1)],
+nets = {
+    'invA': [('inv', 3, C, 1), ('conv', C, C, 1),
+             ('conv', C, 2*C, 2), ('conv', 2*C, 2*C, 1),
+             ('conv', 2*C, 4*C, 2), ('conv', 4*C, 4*C, 1)],
+    'invB': [('conv', 3, C, 1), ('inv', C, C, 2),
+             ('conv', C, 2*C, 1), ('conv', 2*C, 2*C, 1),
+             ('conv', 2*C, 4*C, 2), ('conv', 4*C, 4*C, 1)],
+    'invC': [('conv', 3, C, 1), ('conv', C, C, 1),
+             ('inv', C, 2*C, 2), ('conv', 2*C, 2*C, 1),
+             ('conv', 2*C, 4*C, 2), ('conv', 4*C, 4*C, 1)],
+    'invD': [('conv', 3, C, 1), ('conv', C, C, 1),
+             ('conv', C, 2*C, 2), ('inv', 2*C, 2*C, 2),
+             ('conv', 2*C, 4*C, 1), ('conv', 4*C, 4*C, 1)],
+    'invE': [('conv', 3, C, 1), ('conv', C, C, 1),
+             ('conv', C, 2*C, 2), ('conv', 2*C, 2*C, 1),
+             ('inv', 2*C, 4*C, 2), ('conv', 4*C, 4*C, 1)],
+    'invF': [('conv', 3, C, 1), ('conv', C, C, 1),
+             ('conv', C, 2*C, 2), ('conv', 2*C, 2*C, 1),
+             ('conv', 2*C, 4*C, 2), ('inv', 4*C, 4*C, 1)],
+    'invAB': [('inv', 3, C, 1), ('inv', C, C, 2),
+              ('conv', C, 2*C, 1), ('conv', 2*C, 2*C, 1),
+              ('conv', 2*C, 4*C, 2), ('conv', 4*C, 4*C, 1)],
+    'invBC': [('conv', 3, C, 1), ('inv', C, C, 2),
+              ('inv', C, 2*C, 1), ('conv', 2*C, 2*C, 1),
+              ('conv', 2*C, 4*C, 2), ('conv', 4*C, 4*C, 1)],
+    'invCD': [('conv', 3, C, 1), ('conv', C, C, 1),
+              ('inv', C, 2*C, 2), ('inv', 2*C, 2*C, 2),
+              ('conv', 2*C, 4*C, 1), ('conv', 4*C, 4*C, 1)],
+    'invDE': [('conv', 3, C, 1), ('conv', C, C, 1),
+              ('conv', C, 2*C, 2), ('inv', 2*C, 2*C, 2),
+              ('inv', 2*C, 4*C, 1), ('conv', 4*C, 4*C, 1)],
+    'invAC': [('inv', 3, C, 1), ('conv', C, C, 1),
+              ('inv', C, 2*C, 2), ('conv', 2*C, 2*C, 1),
+              ('conv', 2*C, 4*C, 2), ('conv', 4*C, 4*C, 1)],
+    'invBD': [('conv', 3, C, 1), ('inv', C, C, 2),
+              ('conv', C, 2*C, 1), ('inv', 2*C, 2*C, 2),
+              ('conv', 2*C, 4*C, 1), ('conv', 4*C, 4*C, 1)],
+    'invCE': [('conv', 3, C, 1), ('conv', C, C, 1),
+              ('inv', C, 2*C, 2), ('conv', 2*C, 2*C, 1),
+              ('inv', 2*C, 4*C, 2), ('conv', 4*C, 4*C, 1)],
+}
+
+
+def changelayer(layers, suffix='_3x3'):
+    out = []
+    for l in layers:
+        if l[0] == 'inv':
+            out.append((l[0]+suffix, l[1], l[2], l[3]))
+        else:
+            out.append(l)
+    return out
+
+
+nets1 = {k + '1': changelayer(v, '_imp') for k, v in nets.items()}
+nets2 = {k + '2': changelayer(v, '_3x3') for k, v in nets.items()}
+allnets = {
+    'ref': [('conv', 3, C, 1), ('conv', C, C, 1),
+            ('conv', C, 2*C, 2), ('conv', 2*C, 2*C, 1),
+            ('conv', 2*C, 4*C, 2), ('conv', 4*C, 4*C, 1)],
+    **nets, **nets1, **nets2
 }
 
 
@@ -204,7 +250,9 @@ class MixedNet(MyModule):
         super().__init__(dataset)
         conv = self.get_block('conv3x3')
         inv = self.get_block('invariantj1')
-        layers = style[type]
+        inv_imp = self.get_block('invariantj1_impulse')
+        inv_3x3 = self.get_block('invariantj1_3x3')
+        layers = allnets[type]
         blks = []
         names = ['conv1_1', 'conv1_2', 'conv2_1',
                  'conv2_2', 'conv3_1', 'conv3_2']
@@ -213,6 +261,10 @@ class MixedNet(MyModule):
                 blks.append((name, conv(C1, C2, stride)))
             elif blk == 'inv':
                 blks.append((name, inv(C1, C2, stride)))
+            elif blk == 'inv_imp':
+                blks.append((name, inv_imp(C1, C2, stride)))
+            elif blk == 'inv_3x3':
+                blks.append((name, inv_3x3(C1, C2, stride)))
 
         # F is the last output size from first 6 layers
         if dataset == 'cifar10' or dataset == 'cifar100':
@@ -284,9 +336,13 @@ class TrainNET(Trainable):
         # ######################################################################
         # Build the network based on the type parameter. θ are the optimal
         # hyperparameters found by cross validation.
-        if type_ == 'A':
+        if type_ == 'ref':
             θ = (0.1, 0.9, 1e-4, 1)
-        elif 'A' < type_ <= 'N':
+        elif type_ in nets.keys():
+            θ = (0.5, 0.85, 1e-4, 1)
+        elif type_ in nets1.keys():
+            θ = (0.5, 0.85, 1e-4, 1)
+        elif type_ in nets2.keys():
             θ = (0.5, 0.85, 1e-4, 1)
         else:
             raise ValueError('Unknown type')
@@ -299,7 +355,8 @@ class TrainNET(Trainable):
         std = config.get('std', std)
         self.model = MixedNet(args.dataset, type_, wd=wd)
         self.model.init(std)
-        self.model.cuda()
+        if args.cuda:
+            self.model.cuda()
 
         # ######################################################################
         # Build the optimizer
@@ -396,11 +453,18 @@ if __name__ == "__main__":
         max_t=200,
         grace_period=120)
 
+    # Select which networks to run
     if args.type is not None:
-        type_ = args.type
+        if args.type == 'nets':
+            type_ = list(nets.keys())
+        elif args.type == 'nets1':
+            type_ = list(nets1.keys())
+        elif args.type == 'nets2':
+            type_ = list(nets2.keys())
+        else:
+            type_ = args.type
     else:
-        type_ = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L',
-                 'M', 'N']
+        type_ = list(nets.keys()) + ['ref',]
 
     tune.run_experiments(
         {
@@ -411,21 +475,23 @@ if __name__ == "__main__":
                 },
                 "resources_per_trial": {
                     "cpu": 1,
-                    "gpu": 0.5,
+                    "gpu": 0 if args.cpu else 0.5
                 },
                 "run": TrainNET,
                 #  "num_samples": 1 if args.smoke_test else 40,
-                "num_samples": 5,
+                "num_samples": 10 if args.nsamples == 0 else args.nsamples,
                 "checkpoint_at_end": True,
                 "config": {
                     "args": args,
                     "type": tune.grid_search(type_),
-                    # "lr": tune.sample_from(lambda spec: np.random.uniform(
-                    #     0.05, 1
-                    # )),
-                    # "mom": tune.sample_from(lambda spec: np.random.uniform(
-                    #     0.75, 0.95
-                    # )),
+                    "lr": tune.sample_from(lambda spec: np.random.uniform(
+                        0.1, 0.8
+                    )),
+                    # This sets a higher momentum for lower learning rates. in
+                    # particular, lr = 0.1 means mom = 0.9, lr = 0.8 means mom =
+                    # 0.75
+                    "mom": tune.sample_from(
+                        lambda spec: 129/140 - 3/14*spec.config.lr),
                     # "wd": tune.sample_from(lambda spec: np.random.uniform(
                     #     1e-5, 5e-4
                     # ))

@@ -26,7 +26,7 @@ A block diagram of what we're doing is shown below (Figure 1 from the paper).
 
 .. image:: images/figure1.png
 
-__ https://arxiv.org/abs/1811.06115
+__ https://arxiv.org/abs/1903.03137
 __ https://arxiv.org/abs/1203.1513 
 
 Installation
@@ -60,7 +60,7 @@ the following code:
 
 .. code:: python
 
-    from scatnet_learn import ScatLayer
+    from scatnet_learn import ScatLayerj1
     import torch.nn as nn
     from collections import OrderedDict
     C = 3
@@ -74,13 +74,16 @@ the following code:
     y.shape
     >>> (1, 147, 16, 16)
 
-If you want to use the proposed expansions from the paper, you can with:
+If you want to use the proposed expansions from the paper, you should instead 
+use the `InvariantLayerj1` class. This wraps the ScatLayerj1 class and adds 
+the learned mixing matrix afterwards.
 
 .. code:: python
 
+    from scatnet_learn import InvariantLayerj1
     frontend = nn.Sequential(OrderedDict([
-                ('order1', ScatLayer(C, learn=True)),
-                ('order2', ScatLayer(7*C, learn=True))]))
+                ('order1', InvariantLayerj1(C)),
+                ('order2', InvariantLayerj1(7*C))]))
 
 By default the mixing matrix will preserve the translation invariant scatternet
 tendency to increase the channel dimension by 7. However, if you want to change
@@ -90,9 +93,15 @@ the number of output channels you can:
     
     C = 3
     frontend = nn.Sequential(OrderedDict([
-                ('order1', ScatLayer(C, F=7*C, learn=True)),
-                ('order2', ScatLayer(7*C, F=7*C, learn=True))]))
+                ('order1', InvariantLayerj1(C, F=7*C)),
+                ('order2', InvariantLayerj1(7*C, F=7*C))]))
     x = torch.randn(1,C,64,64)
     y = frontend(x)
     y.shape
     >>> (1, 21, 16, 16)
+
+Experiments
+-----------
+In the experiments folder, there are scripts for running cifar and mnist
+experiments using the newly proposed learnable scatternet layer. These were the
+scripts used to generate the results tables in the paper. 

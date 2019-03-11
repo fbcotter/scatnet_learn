@@ -4,7 +4,6 @@ import os
 import sys
 import random
 import torch.utils.data
-from shutil import copyfile
 
 
 def subsample(data_dir, sz):
@@ -49,7 +48,7 @@ def get_data(in_size, data_dir, val_only=False, batch_size=128,
 
     if not os.path.exists(valdir):
         raise ValueError(
-            'Could not find the val2 folder in the Tiny Imagenet directory.' 
+            'Could not find the val2 folder in the Tiny Imagenet directory.'
             'Have you run the prep_tinyimagenet.py script in '
             'scatnet_learn.data?')
 

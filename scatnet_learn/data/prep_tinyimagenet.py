@@ -14,6 +14,8 @@ parser = argparse.ArgumentParser(description='Prep tiny imagenet for '
 parser.add_argument('data_dir', type=str,
                     default='/scratch/share/Tiny_Imagenet',
                     help='Default location for the dataset')
+
+
 def main(args):
     labels = {}
     with open(os.path.join(args.data_dir, 'val', 'val_annotations.txt')) as f:

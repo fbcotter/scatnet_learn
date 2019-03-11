@@ -9,7 +9,7 @@ import os
 import random
 import tarfile
 import pickle
-from wnet.utils import download, md5, convert_to_one_hot
+from scatnet_learn.utils import download, md5, convert_to_one_hot
 
 mean = {
     'cifar10': (0.4914, 0.4822, 0.4465),

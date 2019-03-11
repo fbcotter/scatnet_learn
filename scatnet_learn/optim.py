@@ -12,7 +12,7 @@ def get_optim(optim, params, init_lr, steps=1, wd=0, gamma=1,
             params, lr=init_lr, momentum=0, weight_decay=wd)
     elif optim == 'adam':
         optimizer = torch.optim.Adam(
-            params, lr=init_lr, weight_decay=wd, #amsgrad=True,
+            params, lr=init_lr, weight_decay=wd,  # amsgrad=True,
             betas=(0.9, .999))
     else:
         raise ValueError('Unknown optimizer')
