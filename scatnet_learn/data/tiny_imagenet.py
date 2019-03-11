@@ -22,7 +22,7 @@ def subsample(data_dir, sz):
 
 def get_data(in_size, data_dir, val_only=False, batch_size=128,
              trainsize=-1, seed=random.randint(0, 10000), perturb=True,
-             num_workers=4, iter_size=1, distributed=False):
+             num_workers=0, iter_size=1, distributed=False, pin_memory=False):
     """ Provides a pytorch loader to load in imagenet
     Args:
         in_size (int): the input size - can be used to scale the spatial size
@@ -51,7 +51,7 @@ def get_data(in_size, data_dir, val_only=False, batch_size=128,
         raise ValueError(
             'Could not find the val2 folder in the Tiny Imagenet directory.' 
             'Have you run the prep_tinyimagenet.py script in '
-            'invariant_convolution.data?')
+            'scatnet_learn.data?')
 
     # Get the test loader
     transform_test = transforms.Compose([
@@ -62,7 +62,7 @@ def get_data(in_size, data_dir, val_only=False, batch_size=128,
     testloader = torch.utils.data.DataLoader(
         datasets.ImageFolder(valdir, transform_test),
         batch_size=batch_size, shuffle=False,
-        num_workers=num_workers, pin_memory=True,
+        num_workers=num_workers, pin_memory=pin_memory,
         worker_init_fn=worker_init_fn)
 
     if val_only:
@@ -103,7 +103,7 @@ def get_data(in_size, data_dir, val_only=False, batch_size=128,
         trainloader = torch.utils.data.DataLoader(
             trainset, batch_size=batch_size // iter_size,
             shuffle=(trainsampler is None), num_workers=num_workers,
-            pin_memory=True, sampler=trainsampler,
+            pin_memory=pin_memory, sampler=trainsampler,
             worker_init_fn=worker_init_fn)
 
     sys.stdout.write("| loaded tiny imagenet")

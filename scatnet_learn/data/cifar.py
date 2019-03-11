@@ -6,7 +6,6 @@ from torchvision import transforms
 import numpy as np
 import torch
 import os
-import sys
 import random
 import tarfile
 import pickle
@@ -197,7 +196,7 @@ def subsample(cifar10=True, size=50000):
 
 def get_data(in_size, data_dir, dataset='cifar10', batch_size=128,
              trainsize=-1, seed=random.randint(0, 10000), perturb=True,
-             double_size=False):
+             double_size=False, pin_memory=True, num_workers=0):
     """ Provides a pytorch loader to load in cifar10/100
     Args:
         in_size (int): the input size - can be used to scale the spatial size
@@ -239,11 +238,9 @@ def get_data(in_size, data_dir, dataset='cifar10', batch_size=128,
     ])
 
     if dataset == 'cifar10':
-        sys.stdout.write("| ")
         trainset = torchvision.datasets.CIFAR10(
-            root=data_dir, train=True, download=True,
+            root=data_dir, train=True, download=False,
             transform=transform_train)
-        sys.stdout.write("| loaded cifar10\n")
         if trainsize > 0:
             idxs = subsample(False, trainsize)
             trainset = torch.utils.data.Subset(trainset, idxs)
@@ -252,11 +249,9 @@ def get_data(in_size, data_dir, dataset='cifar10', batch_size=128,
             transform=transform_test)
 
     elif dataset == 'cifar100':
-        sys.stdout.write("| ")
         trainset = torchvision.datasets.CIFAR100(
-            root=data_dir, train=True, download=True,
+            root=data_dir, train=True, download=False,
             transform=transform_train)
-        sys.stdout.write("| loaded cifar100\n")
         if trainsize > 0:
             idxs = subsample(False, trainsize)
             trainset = torch.utils.data.Subset(trainset, idxs)
@@ -272,10 +267,10 @@ def get_data(in_size, data_dir, dataset='cifar10', batch_size=128,
         np.random.seed(seed+id)
 
     trainloader = torch.utils.data.DataLoader(
-        trainset, batch_size=batch_size, shuffle=True, num_workers=0,
-        worker_init_fn=worker_init_fn)
+        trainset, batch_size=batch_size, shuffle=True, num_workers=num_workers,
+        worker_init_fn=worker_init_fn, pin_memory=pin_memory)
     testloader = torch.utils.data.DataLoader(
-        testset, batch_size=100, shuffle=False, num_workers=0,
-        worker_init_fn=worker_init_fn)
+        testset, batch_size=100, shuffle=False, num_workers=num_workers,
+        worker_init_fn=worker_init_fn, pin_memory=pin_memory)
 
     return trainloader, testloader

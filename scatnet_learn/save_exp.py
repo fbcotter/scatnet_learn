@@ -12,7 +12,7 @@ import time
 import sys
 import git
 from shutil import copyfile
-import invariant_convolution as ic
+import scatnet_learn as sl
 
 
 TEMPLATE = """ICIP Experiment
@@ -105,7 +105,7 @@ def save_experiment_info(outdir, seed, no_comment=False,
             day=time.strftime('%Y/%m/%d'),
             time=time.strftime("%H-%M-%S", time.gmtime(time.time())),
             runcmd='python {}'.format(' '.join(sys.argv)),
-            githash=get_githash(ic),
+            githash=get_githash(sl),
             seed=seed,
             num_params=get_num_params(net)
         ))

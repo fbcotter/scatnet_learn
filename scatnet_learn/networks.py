@@ -3,7 +3,7 @@ import torch.nn as nn
 from collections import OrderedDict
 import torch.nn.init as init
 from math import sqrt
-import invariant_convolution.layers as l
+import scatnet_learn.layers as l
 from functools import reduce
 import torch
 

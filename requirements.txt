@@ -1,0 +1,5 @@
+ray
+torch
+torchvision
+pytorch_wavelets
+scipy

@@ -189,24 +189,31 @@ class InvariantLayerj1(nn.Module):
 
         self.scat = ScatLayerj1(stride=stride)
         # Create the learned mixing weights and possibly the expansion kernel
-        self.A = nn.Parameter(torch.randn(C*7, F, k, k))
+        self.A = nn.Parameter(torch.randn(F, 7*C, k, k))
         self.b = nn.Parameter(torch.zeros(F,))
         if alpha == 'impulse':
             self.alpha = nn.Parameter(
-                random_postconv_impulse(C*7, F), requires_grad=False)
+                random_postconv_impulse(7*C, F), requires_grad=False)
             self.pad = 1
         elif alpha == 'smooth':
             self.alpha = nn.Parameter(
-                random_postconv_smooth(C*7, F, σ=1), requires_grad=False)
+                random_postconv_smooth(7*C, F, σ=1), requires_grad=False)
+            self.pad = 1
+        elif alpha == 'random':
+            self.alpha = nn.Parameter(
+                torch.randn(F, 7*C, 3, 3), requires_grad=False)
+            init.xavier_uniform(self.alpha)
             self.pad = 1
         elif alpha is None:
             self.alpha = 1
             self.pad = (k-1) // 2
+        else:
+            raise ValueError
 
     def forward(self, x):
         z = self.scat(x)
         As = self.A * self.alpha
-        y = func.conv2d(z, As, self.b, padding=1)
+        y = func.conv2d(z, As, self.b, padding=self.pad)
         y = func.relu(y)
         return y
 
@@ -261,174 +268,3 @@ class InvariantLayerj1_dct(nn.Module):
         init.xavier_uniform_(self.A1, gain=gain)
         init.xavier_uniform_(self.A2, gain=gain)
         init.xavier_uniform_(self.A3, gain=gain)
-
-
-class InvNet_shift(nn.Module):
-    def __init__(self, C1=7, C2=49, shift='random'):
-        super().__init__()
-        if shift == 'dct':
-            self.conv1 = InvariantLayerj1_dct(1, C1, stride=2)
-            self.conv2 = InvariantLayerj1_dct(C1, C2, stride=2)
-        else:
-            self.conv1 = InvariantLayerj1_alpha(1, C1, stride=2, alpha=shift)
-            self.conv2 = InvariantLayerj1_alpha(C1, C2, stride=2, alpha=shift)
-
-        # Create the projection layer that doesn't need learning
-        self.fc1 = nn.Linear(7*7*C2, 10)
-        self.fc1.weight.requires_grad = False
-        self.fc1.bias.requires_grad = False
-        self.fc1.bias.data.zero_()
-        self.fc2 = nn.Linear(10, 10)
-
-    def forward(self, x):
-        x = self.conv1(x)
-        x = self.conv2(x)
-        x = x.view(x.shape[0], -1)
-        y = F.relu(self.fc1(x))
-        y = self.fc2(y)
-        return F.log_softmax(y, dim=1)
-
-    def init(self, std=1):
-        for child in self.children():
-            try:
-                child.init(std)
-            except AttributeError:
-                pass
-
-class InvariantLayerj1(nn.Module):
-    """ This layer is a nonlinear convolutional layer.
-
-    It takes a wavelet transform of an image and discards the phase. This is
-    the nonlinear section. It means that multiple inputs will map to the same
-    output, but is nice as it allows invariance to small shifts.
-
-    As for noise, the wavelet coefficients are energy preserving, so there
-    will be no magnification.
-    """
-    def __init__(self, C, F, stride=1, p=0.):
-        super().__init__()
-        self.xfm = DTCWTForward(J=1, o_dim=1, ri_dim=2)
-        self.mag = MagReshape(b=0.0001, o_dim=1, ri_dim=2)
-        self.gain = nn.Conv2d(C*7, F, 1)
-        self.avg = nn.AvgPool2d(2)
-        if p > 0:
-            self.drop = nn.Dropout(p=p)
-        else:
-            self.drop = None
-        # self.bn = nn.BatchNorm2d(F)
-        assert abs(stride) == 1 or stride == 2, "Limited resampling at the moment"
-        self.stride = stride
-
-    def forward(self, x):
-        if self.stride == -1:
-            x = func.interpolate(x, scale_factor=2, mode='bilinear',
-                                 align_corners=False)
-        yl, (yh,) = self.xfm(x)
-
-        # Take the magnitude
-        U = self.mag(yh)
-        # Concatenate (Multiply lowpass by 2 to keep the DC gain 1)
-        z = torch.cat((2*self.avg(yl), U), dim=1)
-        y = self.gain(z)
-        if self.drop is not None:
-            y = self.drop(y)
-        y = func.relu(y)
-        if self.stride == 1:
-            y = func.interpolate(y, scale_factor=2, mode='bilinear',
-                                 align_corners=False)
-        return y
-
-    def init(self):
-        if self.learn:
-            init.xavier_uniform_(self.gain.weight, gain=sqrt(2))
-
-
-class InvariantCompressLayerj1(nn.Module):
-    """ This layer is a nonlinear convolutional layer.
-
-    It takes a wavelet transform of an image and discards the phase. This is
-    the nonlinear section. It means that multiple inputs will map to the same
-    output, but is nice as it allows invariance to small shifts.
-
-    """
-    def __init__(self, C, F, stride=1):
-        super().__init__()
-        self.xfm = DTCWTForward(J=1, o_before_c=True)
-        self.mag = MagReshape(b=0.0001)
-
-        self.bp1 = nn.Conv2d(C*6, F//2, 1, bias=False)
-        self.bn_bp = nn.BatchNorm2d(F//2)
-        self.bp2 = nn.Conv2d(F//2, F, 1, padding=0)
-
-        self.lp1 = nn.Conv2d(C, F, 1, padding=0, stride=2)
-
-        self.bn = nn.BatchNorm2d(F)
-        assert stride == 1 or stride == 2, "Limited resampling at the moment"
-        self.stride = stride
-
-    def forward(self, x):
-        yl, (yh,) = self.xfm(x)
-        yhm = self.mag(yh)
-        y = self.bp1(yhm)
-        y = self.bp2(func.relu(self.bn_bp(y)))
-
-        # y = y + self.lp1(yl[:,:,::2,::2])
-        y = y + self.lp1(yl)
-
-        y = func.relu(self.bn(y))
-
-        if self.stride == 1:
-            y = func.interpolate(y, scale_factor=2, mode='bilinear',
-                                 align_corners=False)
-        return y
-
-
-class ScatLayer(nn.Module):
-    """ Do a single order scattering of the input, potentially with learning
-    afterwards.
-
-    If the input has C channels, the output will have 7*C channels, the first C
-    of which are the lowpasses, then the next C are the 15 degree wavelets,
-    and so on.
-    """
-    def __init__(self, C, stride=2, learn=False, resid=False, p=0.):
-        super().__init__()
-        self.xfm = DTCWTForward(J=1, o_dim=1, ri_dim=3)
-        self.mag = MagReshape(b=0.0001, o_dim=1, ri_dim=3)
-        self.learn = learn
-        self.resid = resid
-        self.avg = nn.AvgPool2d(2)
-        if learn:
-            self.gain = nn.Conv2d(C*7, C*7, 1)
-            if p > 0:
-                self.drop = nn.Dropout(p=p)
-            else:
-                self.drop = None
-        assert abs(stride) == 1 or stride == 2, "Limited resampling at the moment"
-        self.stride = stride
-
-    def forward(self, x):
-        yl, (yh,) = self.xfm(x)
-        yhm = self.mag(yh)
-        # Multiply by 2 to keep the DC gain constant
-        y = torch.cat((2*self.avg(yl), yhm), dim=1)
-        if self.learn:
-            if self.resid:
-                y = y + func.relu(self.gain(y))
-            else:
-                y = func.relu(self.gain(y))
-            if self.drop is not None:
-                y = self.drop(y)
-
-        if self.stride == 1:
-            y = func.interpolate(y, scale_factor=2, mode='bilinear',
-                                 align_corners=False)
-        return y
-
-    def init(self):
-        if self.learn:
-            if self.resid:
-                init.xavier_uniform_(self.gain.weight, gain=.2)
-            else:
-                init.xavier_uniform_(self.gain.weight, gain=1)
-

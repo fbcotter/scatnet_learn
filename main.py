@@ -15,7 +15,7 @@ import torch.backends.cudnn as cudnn
 import py3nvml
 from tensorboardX import SummaryWriter
 import time
-from invariant_convolution.save_exp import save_experiment_info, save_acc
+from scatnet_learn.save_exp import save_experiment_info, save_acc
 
 import random
 
@@ -24,9 +24,9 @@ import sys
 import argparse
 import numpy as np
 
-from invariant_convolution.networks import FlexibleNet, net_init, MixedNet, ScatNet, MixedNet2
-from invariant_convolution.data import cifar, tiny_imagenet
-from invariant_convolution import learn, optim
+from scatnet_learn.networks import FlexibleNet, net_init, MixedNet, ScatNet, MixedNet2
+from scatnet_learn.data import cifar, tiny_imagenet
+from scatnet_learn import learn, optim
 
 parser = argparse.ArgumentParser(description='ICIP 2019 Invariant Layer '
                                              'Experiments')
