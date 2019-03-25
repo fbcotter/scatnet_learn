@@ -2,14 +2,13 @@
 This script allows you to run a host of tests on the invariant layer and
 slightly different variants of it on CIFAR.
 """
-import sys
 import argparse
 import os
 import torch
 import torch.nn as nn
 import torch.nn.init as init
 import time
-from scatnet_learn.layers import InvariantLayerj1, InvariantLayerj1_compress
+from scatnet_learn.layers import InvariantLayerj1, ScatLayerj1
 import torch.nn.functional as func
 import numpy as np
 import random
@@ -46,11 +45,7 @@ parser.add_argument('--epochs', default=120, type=int, help='num epochs')
 parser.add_argument('--cpu', action='store_true', help='Do not run on gpus')
 parser.add_argument('--no-scheduler', action='store_true')
 parser.add_argument('--type', default=None, type=str, nargs='+',
-                    help='''Model type(s) to build. If left blank, will run 14
-networks consisting of those defined by the dictionary "nets" (0, 1, or 2
-invariant layers at different depths). Can also specify to run "nets1" or
-"nets2", which swaps out the invariant layers for other iterations.
-Alternatively can directly specify the layer name, e.g. "invA", or "invB2".''')
+                    help='''Model type(s) to build.''')
 
 # Core hyperparameters
 parser.add_argument('--reg', default='l2', type=str, help='regularization term')
@@ -86,17 +81,30 @@ class MyModule(nn.Module):
 
     def get_block(self, block):
         """ Choose the core block type """
-        if block == 'conv3x3':
-            def blk(C, F, stride, k=3):
+        if block == 'conv':
+            def blk(C, F, stride, k=3, p=0.):
+                if p == 0.0:
+                    return nn.Sequential(
+                        nn.Conv2d(C, F, k, padding=(k-1)//2, stride=stride),
+                        nn.BatchNorm2d(F),
+                        nn.ReLU())
+                else:
+                    return nn.Sequential(
+                        nn.Conv2d(C, F, k, padding=(k-1)//2, stride=stride),
+                        nn.Dropout2d(p=p),
+                        nn.BatchNorm2d(F),
+                        nn.ReLU())
+        elif block == 'invariantj1':
+            def blk(C, F=None, stride=2, k=1, alpha=None, learn=True):
                 return nn.Sequential(
-                    nn.Conv2d(C, F, k, padding=1, stride=stride),
+                    InvariantLayerj1(C, F, stride, k, alpha, learn=learn),
                     nn.BatchNorm2d(F),
                     nn.ReLU())
-        elif block == 'invariantj1':
-            def blk(C, F=None, stride=2, k=1, alpha=None):
+        elif block == 'scatj1':
+            def blk(C):
                 return nn.Sequential(
-                    InvariantLayerj1(C, F, stride, k, alpha),
-                    nn.BatchNorm2d(F),
+                    ScatLayerj1(),
+                    nn.BatchNorm2d(7*C),
                     nn.ReLU())
         else:
             raise ValueError("Unknown block type {}".format(block))
@@ -131,128 +139,58 @@ class MyModule(nn.Module):
 # layer for an invariant layer with random shifts
 # The dicionary 'nets3' is the same as 'nets' except we change the invariant
 # layer for an invariant layer with a 3x3 convolution
-C = 64
-nets = {
-    'invA': [('inv', 3, C, 1), ('conv', C, C, 1), ('pool', 1, None, None),
-             ('conv', C, 2*C, 1), ('conv', 2*C, 2*C, 1),('pool', 2, None, None),
-             ('conv', 2*C, 4*C, 1), ('conv', 4*C, 4*C, 1)],
-    'invB': [('conv', 3, C, 1), ('inv', C, C, 2),
-             ('conv', C, 2*C, 1), ('conv', 2*C, 2*C, 1),('pool', 1, None, None),
-             ('conv', 2*C, 4*C, 1), ('conv', 4*C, 4*C, 1)],
-    'invC': [('conv', 3, C, 1), ('conv', C, C, 1),
-             ('inv', C, 2*C, 2), ('conv', 2*C, 2*C, 1),('pool', 1, None, None),
-             ('conv', 2*C, 4*C, 1), ('conv', 4*C, 4*C, 1)],
-    'invD': [('conv', 3, C, 1), ('conv', C, C, 1),('pool', 1, None, None),
-             ('conv', C, 2*C, 1), ('inv', 2*C, 2*C, 2),
-             ('conv', 2*C, 4*C, 1), ('conv', 4*C, 4*C, 1)],
-    'invE': [('conv', 3, C, 1), ('conv', C, C, 1),('pool', 1, None, None),
-             ('conv', C, 2*C, 1), ('conv', 2*C, 2*C, 1),
-             ('inv', 2*C, 4*C, 2), ('conv', 4*C, 4*C, 1)],
-    'invF': [('conv', 3, C, 1), ('conv', C, C, 1),('pool', 1, None, None),
-             ('conv', C, 2*C, 1), ('conv', 2*C, 2*C, 1),('pool', 2, None, None),
-             ('conv', 2*C, 4*C, 1), ('inv', 4*C, 4*C, 1)],
-    'invAB': [('inv', 3, C, 1), ('inv', C, C, 2),
-              ('conv', C, 2*C, 1), ('conv', 2*C, 2*C, 1),('pool', 1, None, None),
-              ('conv', 2*C, 4*C, 1), ('conv', 4*C, 4*C, 1)],
-    'invBC': [('conv', 3, C, 1), ('inv', C, C, 2),
-              ('inv', C, 2*C, 1), ('conv', 2*C, 2*C, 1),('pool', 1, None, None),
-              ('conv', 2*C, 4*C, 1), ('conv', 4*C, 4*C, 1)],
-    'invCD': [('conv', 3, C, 1), ('conv', C, C, 1),
-              ('inv', C, 2*C, 2), ('inv', 2*C, 2*C, 2),
-              ('conv', 2*C, 4*C, 1), ('conv', 4*C, 4*C, 1)],
-    'invDE': [('conv', 3, C, 1), ('conv', C, C, 1),('pool', 1, None, None),
-              ('conv', C, 2*C, 1), ('inv', 2*C, 2*C, 2),
-              ('inv', 2*C, 4*C, 1), ('conv', 4*C, 4*C, 1)],
-    'invAC': [('inv', 3, C, 1), ('conv', C, C, 1),
-              ('inv', C, 2*C, 2), ('conv', 2*C, 2*C, 1),('pool', 2, None, None),
-              ('conv', 2*C, 4*C, 1), ('conv', 4*C, 4*C, 1)],
-    'invBD': [('conv', 3, C, 1), ('inv', C, C, 2),
-              ('conv', C, 2*C, 1), ('inv', 2*C, 2*C, 2),
-              ('conv', 2*C, 4*C, 1), ('conv', 4*C, 4*C, 1)],
-    'invCE': [('conv', 3, C, 1), ('conv', C, C, 1),
-              ('inv', C, 2*C, 2), ('conv', 2*C, 2*C, 1),
-              ('inv', 2*C, 4*C, 2), ('conv', 4*C, 4*C, 1)],
-}
+C = 96
+nets = {'ref': [('conv', 3, 21, 1), ('pool', 1, None, None),
+                ('conv', 21, 147, 1), ('pool', 2, None, None),
+                ('conv', 147, 2*C, 1), ('conv', 2*C, 2*C, 1),
+                ('conv', 2*C, 4*C, 1), ('conv', 4*C, 4*C, 1)],
+        'scatA':[('inv_nolearn', 3, 21, 2), ('inv_nolearn', 21, 147, 2),
+                 ('conv', 147, 2*C, 1), ('conv', 2*C, 2*C, 1),
+                 ('conv', 2*C, 4*C, 1), ('conv', 4*C, 4*C, 1)],
+        'scatB':[('inv', 3, 21, 2), ('inv', 21, 147, 2),
+                 ('conv', 147, 2*C, 1), ('conv', 2*C, 2*C, 1),
+                 ('conv', 2*C, 4*C, 1), ('conv', 4*C, 4*C, 1)],
+        'scatC':[('conv', 3, 16, 1), ('inv', 16, 21, 2), ('inv', 21, 147, 2),
+                 ('conv', 147, 2*C, 1), ('conv', 2*C, 2*C, 1),
+                 ('conv', 2*C, 4*C, 1), ('conv', 4*C, 4*C, 1)],}
 
 
-def changelayer(layers, suffix='_3x3'):
-    out = []
-    for l in layers:
-        if l[0] == 'inv':
-            out.append((l[0]+suffix, l[1], l[2], l[3]))
-        else:
-            out.append(l)
-    return out
-
-
-nets1 = {k + '1': changelayer(v, '_imp') for k, v in nets.items()}
-nets2 = {k + '2': changelayer(v, '_3x3') for k, v in nets.items()}
-allnets = {
-    'ref': [('conv', 3, C, 1), ('conv', C, C, 1),
-            ('conv', C, 2*C, 2), ('conv', 2*C, 2*C, 1),
-            ('conv', 2*C, 4*C, 2), ('conv', 4*C, 4*C, 1)],
-    'ref2': [('conv', 3, C, 1), ('conv', C, C, 1), ('pool', 1, None, None),
-             ('conv', C, 2*C, 1), ('conv', 2*C, 2*C, 1), ('pool', 2, None, None),
-             ('conv', 2*C, 4*C, 1), ('conv', 4*C, 4*C, 1)],
-    'invall': [('inv', 3, C, 1), ('inv', C, C, 1),
-               ('inv', C, 2*C, 2), ('inv', 2*C, 2*C, 1),
-               ('inv', 2*C, 4*C, 2), ('inv', 4*C, 4*C, 1)],
-    'invC3': [('conv', 3, C, 1), ('conv', C, C//2, 1),
-              ('inv', C//2, 2*C, 2), ('conv', 2*C, 2*C, 1),
-              ('conv', 2*C, 4*C, 2), ('conv', 4*C, 4*C, 1)],
-    'invBD3': [('conv', 3, C//2, 1), ('inv', C//2, C, 2),
-              ('conv', C, C, 1), ('inv', C, 2*C, 2),
-              ('conv', 2*C, 4*C, 1), ('conv', 4*C, 4*C, 1)],
-    **nets, **nets1, **nets2
-}
-
-
-class MixedNet(MyModule):
-    """ MixedNet allows custom definition of conv/inv layers as you would
-    a normal network. You can change the ordering below to suit your
-    task
+class ScatNet(MyModule):
+    """ ScatNet is like a MixedNet but with a scattering front end (perhaps
+    with learning between the layers)
     """
-    def __init__(self, dataset, type):
+    def __init__(self, dataset, type_, drop_p=0.):
         super().__init__(dataset)
-        conv = self.get_block('conv3x3')
+        conv = self.get_block('conv')
         inv = self.get_block('invariantj1')
-        inv_imp = lambda C, F, stride: inv(C, F, stride, alpha='impulse')
-        inv_3x3 = lambda C, F, stride: inv(C, F, stride, k=3)
-        layers = allnets[type]
+        scat = self.get_block('scatj1')
         blks = []
-        #  names = ['conv1_1', 'conv1_2', 'conv2_1',
-                 #  'conv2_2', 'conv3_1', 'conv3_2']
         layer = 0
-        for blk, C1, C2, stride in layers:
+        for blk, C1, C2, stride in nets[type_]:
+            letter = chr(ord('A') + layer)
             if blk == 'conv':
-                blks.append(('conv' + chr(ord('A') + layer),
-                             conv(C1, C2, stride)))
+                blks.append(('conv' + letter, conv(C1, C2, stride, 3, drop_p)))
                 layer += 1
             elif blk == 'pool':
                 blks.append(('pool' + str(C1), nn.MaxPool2d(2)))
             elif blk == 'inv':
-                blks.append(('inv' + chr(ord('A') + layer),
-                             inv(C1, C2, stride)))
+                blks.append(('inv' + letter, inv(C1, C2, stride)))
                 layer += 1
-            elif blk == 'inv_imp':
-                blks.append(('inv' + chr(ord('A') + layer),
-                             inv_imp(C1, C2, stride)))
-                layer += 1
-            elif blk == 'inv_3x3':
-                blks.append(('inv' + chr(ord('A') + layer),
-                             inv_3x3(C1, C2, stride)))
+            elif blk == 'inv_nolearn':
+                blks.append(('scat' + letter, scat(C1)))
                 layer += 1
 
-        # F is the last output size from first 6 layers
         if dataset == 'cifar10' or dataset == 'cifar100':
             # Network is 3 stages of convolution
             self.net = nn.Sequential(OrderedDict(blks))
             self.avg = nn.AvgPool2d(8)
             self.fc1 = nn.Linear(C2, self.num_classes)
         elif dataset == 'tiny_imagenet':
+            l1 = chr(ord('A') + layer)
+            l2 = chr(ord('A') + layer + 1)
             blks = blks + [
-                ('convG', conv(C2, 2*C2, 2)),
-                ('convH', conv(2*C2, 2*C2, 1))]
+                ('conv' + l1, conv(C2, 2*C2, 2)),
+                ('conv' + l2, conv(2*C2, 2*C2, 1))]
             self.net = nn.Sequential(OrderedDict(blks))
             self.avg = nn.AvgPool2d(8)
             self.fc1 = nn.Linear(512, self.num_classes)
@@ -307,28 +245,23 @@ class TrainNET(BaseClass):
         # ######################################################################
         # Build the network based on the type parameter. θ are the optimal
         # hyperparameters found by cross validation.
-        if type_.startswith('ref'):
-            θ = (0.1, 0.9, 1e-4, 1)
-        elif type_ in nets.keys():
-            θ = (0.5, 0.75, 1e-4, 1)
-        elif type_ in nets1.keys():
-            θ = (0.5, 0.85, 1e-4, 1)
-        elif type_ in nets2.keys():
-            θ = (0.5, 0.80, 1e-4, 1)
-        elif type_ == 'invall':
-            θ = (0.5, 0.70, 1e-4, 1)
+        if type_ == 'ref':
+            θ = (0.1, 0.9, 1e-4, 1, 0.3)
+        elif type_.startswith('scat'):
+            θ = (0.5, 0.85, 1e-4, 1, 0.3)
         else:
-            θ = (0.5, 0.85, 1e-4, 1)
+            θ = (0.5, 0.85, 1e-4, 1, 0.3)
             #  raise ValueError('Unknown type')
-        lr, mom, wd, std = θ
+        lr, mom, wd, std, drop_p = θ
         # If the parameters were provided as an option, use them
         lr = config.get('lr', lr)
         mom = config.get('mom', mom)
         wd = config.get('wd', wd)
         std = config.get('std', std)
+        drop_p = config.get('drop_p', drop_p)
 
         # Build the network
-        self.model = MixedNet(args.dataset, type_)
+        self.model = ScatNet(args.dataset, type_, drop_p)
         self.model.init(std)
         if self.use_cuda:
             self.model.cuda()
@@ -362,6 +295,8 @@ def linear_func(x1, y1, x2, y2):
 
 if __name__ == "__main__":
     args = parser.parse_args()
+    if not torch.cuda.is_available():
+        args.cpu = True
 
     if args.no_scheduler:
         args.verbose = True
@@ -369,7 +304,7 @@ if __name__ == "__main__":
         if not os.path.exists(outdir):
             os.mkdir(outdir)
         if args.type is None:
-            type_ = 'ref2'
+            type_ = 'ref'
         else:
             type_ = args.type[0]
         cfg = {'args': args, 'type': type_}
@@ -417,17 +352,10 @@ if __name__ == "__main__":
             grace_period=120)
 
         # Select which networks to run
-        if args.type is not None:
-            if len(args.type) == 1 and args.type[0] == 'nets':
-                type_ = list(nets.keys()) + ['ref2']
-            elif len(args.type) == 1 and args.type[0] == 'nets1':
-                type_ = list(nets1.keys()) + ['ref2']
-            elif len(args.type) == 1 and args.type[0] == 'nets2':
-                type_ = list(nets2.keys()) + ['ref2']
-            else:
-                type_ = args.type
+        if args.type is None:
+            type_ = list(nets.keys())
         else:
-            type_ = list(nets.keys()) + ['ref2',]
+            type_ = args.type
 
         m, b = linear_func(0.1, 0.9, 0.7, 0.75)
         tune.run_experiments(
@@ -448,15 +376,15 @@ if __name__ == "__main__":
                     "config": {
                         "args": args,
                         "type": tune.grid_search(type_),
-                        #  "lr": tune.sample_from(lambda spec: np.random.uniform(
-                            #  0.1, 0.7
-                        #  )),
-                        #  "mom": tune.sample_from(
-                            #  lambda spec: m*spec.config.lr + b +
-                                #  0.05*np.random.randn()),
-                        #  "wd": tune.sample_from(lambda spec: np.random.uniform(
-                           #  1e-5, 5e-4
-                        #  ))
+                        "lr": tune.sample_from(lambda spec: np.random.uniform(
+                            0.1, 0.7
+                        )),
+                        "mom": tune.sample_from(
+                            lambda spec: m*spec.config.lr + b +
+                                0.05*np.random.randn()),
+                        "wd": tune.sample_from(lambda spec: np.random.uniform(
+                           1e-5, 5e-4
+                        ))
                         #  "lr": tune.grid_search([0.01, 0.0316, 0.1, 0.316, 1]),
                         #  "momentum": tune.grid_search([0.7, 0.8, 0.9]),
                         #  "wd": tune.grid_search([1e-5, 1e-1e-4]),
@@ -466,4 +394,3 @@ if __name__ == "__main__":
             },
             verbose=1,
             scheduler=sched)
-

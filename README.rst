@@ -67,8 +67,8 @@ the following code:
     # A standard scatlayer expands the channel input from C to 7C - one 
     # lowpass and 6 oriented bandpass.
     frontend = nn.Sequential(OrderedDict([
-                ('order1', ScatLayer(C)),
-                ('order2', ScatLayer(7*C))]))
+                ('order1', ScatLayer()),
+                ('order2', ScatLayer())]))
     x = torch.randn(1,C,64,64)
     y = frontend(x)
     y.shape
