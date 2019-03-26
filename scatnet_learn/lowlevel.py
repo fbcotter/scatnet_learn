@@ -153,8 +153,6 @@ def biort(name):
     :raises IOError: if name does not correspond to a set of wavelets known to
         the library.
     :raises ValueError: if name doesn't specify
-        :py:func:`pytorch_wavelets.dtcwt.coeffs.qshift` wavelet.
-
     """
     if name == 'near_sym_b_bp':
         return _load_from_file(name, ('h0o', 'g0o', 'h1o', 'g1o', 'h2o', 'g2o'))
@@ -192,7 +190,6 @@ class ScatLayerj1_f(torch.autograd.Function):
     def forward(ctx, x, h0o, h1o):
         bias = 1e-5
         #  bias = 0
-        ctx.save_for_backward(h0o, h1o)
         ctx.in_shape = x.shape
         batch, ch, r, c = x.shape
         ctx.extra_rows = 0
@@ -227,8 +224,8 @@ class ScatLayerj1_f(torch.autograd.Function):
             [deg15r, deg45r, deg75r, deg105r, deg135r, deg165r], dim=1)
         imags = torch.stack(
             [deg15i, deg45i, deg75i, deg105i, deg135i, deg165i], dim=1)
-        val = torch.sqrt(reals**2 + imags**2 + bias)
-        mags = val - np.sqrt(bias)
+        val = torch.sqrt(reals**2 + imags**2 + bias**2)
+        mags = val - bias
         if x.requires_grad:
             θ = torch.atan2(imags, reals)
             ctx.save_for_backward(h0o, h1o, θ)
@@ -240,15 +237,14 @@ class ScatLayerj1_f(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dZ):
-        h0o, h1o, θ = ctx.saved_tensors
         dX = None
 
-        # Use the special properties of the filters to get the time reverse
-        h0o_t = h0o
-        h1o_t = h1o
-
         if ctx.needs_input_grad[0]:
-            dZ = dZ
+            h0o, h1o, θ = ctx.saved_tensors
+            # Use the special properties of the filters to get the time reverse
+            h0o_t = h0o
+            h1o_t = h1o
+
             # Level 1 backward (time reversed biorthogonal analysis filters)
             dYl, dYm = dZ[:,0], dZ[:,1:]
             ll = 1/4 * F.interpolate(dYl, scale_factor=2, mode="nearest")
@@ -262,6 +258,94 @@ class ScatLayerj1_f(torch.autograd.Function):
             Hi = colfilter(hh, h1o_t) + colfilter(hl, h0o_t)
             Lo = colfilter(lh, h1o_t) + colfilter(ll, h0o_t)
             dX = rowfilter(Hi, h1o_t) + rowfilter(Lo, h0o_t)
+
+            if ctx.extra_rows:
+                dX = dX[..., :-1, :]
+            if ctx.extra_cols:
+                dX = dX[..., :-1]
+
+        return (dX,) + (None,) * 10
+
+
+class ScatLayerj1_rot_f(torch.autograd.Function):
+    """ Function to do forward and backward passes of a single scattering
+    layer with the DTCWT biorthogonal filters. Uses the rotationally symmetric
+    filters, i.e. a slightly more expensive operation."""
+
+    @staticmethod
+    def forward(ctx, x, h0o, h1o, h2o):
+        bias = 1e-5
+        #  bias = 0
+        ctx.in_shape = x.shape
+        batch, ch, r, c = x.shape
+        ctx.extra_rows = 0
+        ctx.extra_cols = 0
+
+        # Do the single scale DTCWT
+        # If the row/col count of X is not divisible by 2 then we need to
+        # extend X
+        if r % 2 != 0:
+            x = torch.cat((x, x[:,:,-1:]), dim=2)
+            ctx.extra_rows = 1
+        if c % 2 != 0:
+            x = torch.cat((x, x[:,:,:,-1:]), dim=3)
+            ctx.extra_cols = 1
+
+        # Level 1 forward (biorthogonal analysis filters)
+        Lo = rowfilter(x, h0o)
+        Hi = rowfilter(x, h1o)
+        Ba = rowfilter(x, h2o)
+
+        LoHi = colfilter(Lo, h1o)
+        HiLo = colfilter(Hi, h0o)
+        HiHi = colfilter(Ba, h2o)
+        LoLo = colfilter(Lo, h0o)
+        LoLo = F.avg_pool2d(LoLo, 2)
+
+        # Convert quads to real and imaginary
+        (deg15r, deg15i), (deg165r, deg165i) = q2c(LoHi)
+        (deg45r, deg45i), (deg135r, deg135i) = q2c(HiHi)
+        (deg75r, deg75i), (deg105r, deg105i) = q2c(HiLo)
+
+        # Convert real and imaginary to magnitude
+        reals = torch.stack(
+            [deg15r, deg45r, deg75r, deg105r, deg135r, deg165r], dim=1)
+        imags = torch.stack(
+            [deg15i, deg45i, deg75i, deg105i, deg135i, deg165i], dim=1)
+        val = torch.sqrt(reals**2 + imags**2 + bias**2)
+        mags = val - bias
+
+        # Save info for backwards pass
+        if x.requires_grad:
+            θ = torch.atan2(imags, reals)
+            ctx.save_for_backward(h0o, h1o, h2o, θ)
+
+        Z = torch.cat((LoLo[:, None], mags), dim=1)
+
+        return Z
+
+    @staticmethod
+    def backward(ctx, dZ):
+        dX = None
+
+        if ctx.needs_input_grad[0]:
+            # Don't need to do time reverse as these filters are symmetric
+            h0o, h1o, h2o, θ = ctx.saved_tensors
+
+            # Level 1 backward (time reversed biorthogonal analysis filters)
+            dYl, dYm = dZ[:,0], dZ[:,1:]
+            ll = 1/4 * F.interpolate(dYl, scale_factor=2, mode="nearest")
+
+            reals = dYm * torch.cos(θ)
+            imags = dYm * torch.sin(θ)
+            lh = c2q((reals[:, 0], imags[:, 0]), (reals[:, 5], imags[:, 5]))
+            hl = c2q((reals[:, 2], imags[:, 2]), (reals[:, 3], imags[:, 3]))
+            hh = c2q((reals[:, 1], imags[:, 1]), (reals[:, 4], imags[:, 4]))
+
+            Lo = colfilter(lh, h1o) + colfilter(ll, h0o)
+            Hi = colfilter(hl, h0o)
+            Ba = colfilter(hh, h2o)
+            dX = rowfilter(Hi, h1o) + rowfilter(Lo, h0o) + rowfilter(Ba, h2o)
 
             if ctx.extra_rows:
                 dX = dX[..., :-1, :]

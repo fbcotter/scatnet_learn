@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as func
 from scatnet_learn.lowlevel import biort as _biort, prep_filt
-from scatnet_learn.lowlevel import ScatLayerj1_f
+from scatnet_learn.lowlevel import ScatLayerj1_f, ScatLayerj1_rot_f
 import torch.nn.init as init
 import numpy as np
 
@@ -243,9 +243,9 @@ class ScatLayerj1(nn.Module):
     second order scatternet by stacking two of these layers.
 
     Inputs:
-        stride (int): 1 or 2. The downsampling factor. By default, 2 makes sense
-          as the information content will be at a lower frequency from the
-          scatternet output, but can use 1 if you do not wish to downsample.
+        biort (str): the biorthogonal filters to use. if 'near_sym_b_bp' will
+            use the rotationally symmetric filters. These have 13 and 19 taps
+            so are quite long. They also require 7 1D convolutions instead of 6.
         x (torch.tensor): Input of shape (N, C, H, W)
 
     Returns:
@@ -257,12 +257,21 @@ class ScatLayerj1(nn.Module):
     def __init__(self, biort='near_sym_a'):
         super().__init__()
         self.biort = biort
-        h0o, _, h1o, _ = _biort(biort)
-        self.h0o = torch.nn.Parameter(prep_filt(h0o, 1), False)
-        self.h1o = torch.nn.Parameter(prep_filt(h1o, 1), False)
+        if biort == 'near_sym_b_bp':
+            h0o, _, h1o, _, h2o, _ = _biort(biort)
+            self.h0o = torch.nn.Parameter(prep_filt(h0o, 1), False)
+            self.h1o = torch.nn.Parameter(prep_filt(h1o, 1), False)
+            self.h2o = torch.nn.Parameter(prep_filt(h2o, 1), False)
+            self.scat = lambda x: ScatLayerj1_rot_f.apply(
+                x, self.h0o, self.h1o, self.h2o)
+        else:
+            h0o, _, h1o, _ = _biort(biort)
+            self.h0o = torch.nn.Parameter(prep_filt(h0o, 1), False)
+            self.h1o = torch.nn.Parameter(prep_filt(h1o, 1), False)
+            self.scat = lambda x: ScatLayerj1_f.apply(x, self.h0o, self.h1o)
 
     def forward(self, x):
-        Z = ScatLayerj1_f.apply(x, self.h0o, self.h1o)
+        Z = self.scat(x)
         b, _, c, h, w = Z.shape
         Z = Z.view(b, 7*c, h, w)
         return Z
