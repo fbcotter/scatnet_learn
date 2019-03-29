@@ -84,24 +84,6 @@ class MyModule(nn.Module):
             self.num_classes = 200
             self.S = 4
 
-    def get_block(self, block):
-        """ Choose the core block type """
-        if block == 'conv3x3':
-            def blk(C, F, stride, k=3):
-                return nn.Sequential(
-                    nn.Conv2d(C, F, k, padding=1, stride=stride),
-                    nn.BatchNorm2d(F),
-                    nn.ReLU())
-        elif block == 'invariantj1':
-            def blk(C, F=None, stride=2, k=1, alpha=None):
-                return nn.Sequential(
-                    InvariantLayerj1(C, F, stride, k, alpha),
-                    nn.BatchNorm2d(F),
-                    nn.ReLU())
-        else:
-            raise ValueError("Unknown block type {}".format(block))
-        return blk
-
     def init(self, std=1):
         """ Define the default initialization scheme """
         self.apply(net_init)
@@ -131,7 +113,7 @@ class MyModule(nn.Module):
 # layer for an invariant layer with random shifts
 # The dicionary 'nets3' is the same as 'nets' except we change the invariant
 # layer for an invariant layer with a 3x3 convolution
-C = 64
+C = 96
 nets = {
     'invA': [('inv', 3, C, 1), ('conv', C, C, 1), ('pool', 1, None, None),
              ('conv', C, 2*C, 1), ('conv', 2*C, 2*C, 1),('pool', 2, None, None),
@@ -194,15 +176,9 @@ allnets = {
     'ref2': [('conv', 3, C, 1), ('conv', C, C, 1), ('pool', 1, None, None),
              ('conv', C, 2*C, 1), ('conv', 2*C, 2*C, 1), ('pool', 2, None, None),
              ('conv', 2*C, 4*C, 1), ('conv', 4*C, 4*C, 1)],
-    'invall': [('inv', 3, C, 1), ('inv', C, C, 1),
-               ('inv', C, 2*C, 2), ('inv', 2*C, 2*C, 1),
-               ('inv', 2*C, 4*C, 2), ('inv', 4*C, 4*C, 1)],
-    'invC3': [('conv', 3, C, 1), ('conv', C, C//2, 1),
-              ('inv', C//2, 2*C, 2), ('conv', 2*C, 2*C, 1),
-              ('conv', 2*C, 4*C, 2), ('conv', 4*C, 4*C, 1)],
-    'invBD3': [('conv', 3, C//2, 1), ('inv', C//2, C, 2),
-              ('conv', C, C, 1), ('inv', C, 2*C, 2),
-              ('conv', 2*C, 4*C, 1), ('conv', 4*C, 4*C, 1)],
+    #  'invall': [('inv', 3, C, 1), ('inv', C, C, 1),
+               #  ('inv', C, 2*C, 2), ('inv', 2*C, 2*C, 1),
+               #  ('inv', 2*C, 4*C, 2), ('inv', 4*C, 4*C, 1)],
     **nets, **nets1, **nets2
 }
 
@@ -212,50 +188,76 @@ class MixedNet(MyModule):
     a normal network. You can change the ordering below to suit your
     task
     """
-    def __init__(self, dataset, type):
+    def __init__(self, dataset, type, biort='near_sym_a'):
         super().__init__(dataset)
-        conv = self.get_block('conv3x3')
-        inv = self.get_block('invariantj1')
-        inv_imp = lambda C, F, stride: inv(C, F, stride, alpha='impulse')
-        inv_3x3 = lambda C, F, stride: inv(C, F, stride, k=3)
         layers = allnets[type]
         blks = []
-        #  names = ['conv1_1', 'conv1_2', 'conv2_1',
-                 #  'conv2_2', 'conv3_1', 'conv3_2']
         layer = 0
         for blk, C1, C2, stride in layers:
             if blk == 'conv':
-                blks.append(('conv' + chr(ord('A') + layer),
-                             conv(C1, C2, stride)))
+                name = 'conv' + chr(ord('A') + layer)
+                # Add a triple of layers for each convolutional layer
+                blk = nn.Sequential(
+                    nn.Conv2d(C1, C2, 3, padding=1, stride=stride),
+                    nn.BatchNorm2d(C2),
+                    nn.ReLU())
                 layer += 1
             elif blk == 'pool':
-                blks.append(('pool' + str(C1), nn.MaxPool2d(2)))
+                name = 'pool' + str(C1)
+                blk = nn.MaxPool2d(2)
             elif blk == 'inv':
-                blks.append(('inv' + chr(ord('A') + layer),
-                             inv(C1, C2, stride)))
+                name = 'inv' + chr(ord('A') + layer)
+                # Add a triple of layers for each invariant layer
+                blk = nn.Sequential(
+                    InvariantLayerj1(C1, C2, stride, biort=biort),
+                    nn.BatchNorm2d(C2),
+                    nn.ReLU())
                 layer += 1
             elif blk == 'inv_imp':
-                blks.append(('inv' + chr(ord('A') + layer),
-                             inv_imp(C1, C2, stride)))
+                name = 'inv_imp' + chr(ord('A') + layer)
+                # Add a triple of layers for each invariant layer
+                blk = nn.Sequential(
+                    InvariantLayerj1(
+                        C1, C2, stride, alpha='impulse', biort=biort),
+                    nn.BatchNorm2d(C2),
+                    nn.ReLU())
                 layer += 1
             elif blk == 'inv_3x3':
-                blks.append(('inv' + chr(ord('A') + layer),
-                             inv_3x3(C1, C2, stride)))
+                name = 'inv3x3' + chr(ord('A') + layer)
+                # Add a triple of layers for each invariant layer
+                blk = nn.Sequential(
+                    InvariantLayerj1(
+                        C1, C2, stride, k=3, biort=biort),
+                    nn.BatchNorm2d(C2),
+                    nn.ReLU())
                 layer += 1
+            # Add the name and block to the list
+            blks.append((name, blk))
 
-        # F is the last output size from first 6 layers
+        # C2 is the last output size from first 6 layers
         if dataset == 'cifar10' or dataset == 'cifar100':
             # Network is 3 stages of convolution
             self.net = nn.Sequential(OrderedDict(blks))
             self.avg = nn.AvgPool2d(8)
             self.fc1 = nn.Linear(C2, self.num_classes)
         elif dataset == 'tiny_imagenet':
+            # Add 3 more layers to tiny imagenet
+            blk1 = nn.MaxPool2d(2)
+            blk2 = nn.Sequential(
+                nn.Conv2d(C2, 2*C2, 3, padding=1, stride=1),
+                nn.BatchNorm2d(2*C2),
+                nn.ReLU())
+            blk3 = nn.Sequential(
+                nn.Conv2d(2*C2, 2*C2, 3, padding=1, stride=1),
+                nn.BatchNorm2d(2*C2),
+                nn.ReLU())
             blks = blks + [
-                ('convG', conv(C2, 2*C2, 2)),
-                ('convH', conv(2*C2, 2*C2, 1))]
+                ('pool3', blk1),
+                ('convG', blk2),
+                ('convH', blk3)]
             self.net = nn.Sequential(OrderedDict(blks))
             self.avg = nn.AvgPool2d(8)
-            self.fc1 = nn.Linear(512, self.num_classes)
+            self.fc1 = nn.Linear(2*C2, self.num_classes)
 
 
 class TrainNET(BaseClass):
@@ -326,9 +328,10 @@ class TrainNET(BaseClass):
         mom = config.get('mom', mom)
         wd = config.get('wd', wd)
         std = config.get('std', std)
+        biort = config.get('biort', 'near_sym_a')
 
         # Build the network
-        self.model = MixedNet(args.dataset, type_)
+        self.model = MixedNet(args.dataset, type_, biort=biort)
         self.model.init(std)
         if self.use_cuda:
             self.model.cuda()
@@ -372,7 +375,7 @@ if __name__ == "__main__":
             type_ = 'ref2'
         else:
             type_ = args.type[0]
-        cfg = {'args': args, 'type': type_}
+        cfg = {'args': args, 'type': type_, 'biort': 'near_sym_b_bp'}
         trn = TrainNET(cfg)
         elapsed_time = 0
 
@@ -424,6 +427,8 @@ if __name__ == "__main__":
                 type_ = list(nets1.keys()) + ['ref2']
             elif len(args.type) == 1 and args.type[0] == 'nets2':
                 type_ = list(nets2.keys()) + ['ref2']
+            elif len(args.type) == 1 and args.type[0] == 'all':
+                type_ = list(allnets.keys())
             else:
                 type_ = args.type
         else:
@@ -448,6 +453,7 @@ if __name__ == "__main__":
                     "config": {
                         "args": args,
                         "type": tune.grid_search(type_),
+                        "biort": tune.grid_search(['near_sym_a', 'near_sym_b_bp'])
                         #  "lr": tune.sample_from(lambda spec: np.random.uniform(
                             #  0.1, 0.7
                         #  )),

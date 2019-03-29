@@ -76,19 +76,21 @@ class InvariantLayerj1(nn.Module):
                     pixel),
                 - 'smooth' (randomly shifts a gaussian left/right and up/down
                     by 1 pixel and uses the mixing matrix to expand this.
+        biort (str): which biorthogonal filters to use.
 
     Returns:
         y (torch.tensor): The output
 
     """
-    def __init__(self, C, F=None, stride=2, k=1, alpha=None):
+    def __init__(self, C, F=None, stride=2, k=1, alpha=None,
+                 biort='near_sym_a'):
         super().__init__()
         if F is None:
             F = 7*C
         if k > 1 and alpha is not None:
             raise ValueError("Only use alpha when k=1")
 
-        self.scat = ScatLayerj1()
+        self.scat = ScatLayerj1(biort=biort)
         self.stride = stride
         # Create the learned mixing weights and possibly the expansion kernel
         self.A = nn.Parameter(torch.randn(F, 7*C, k, k))
@@ -97,6 +99,7 @@ class InvariantLayerj1(nn.Module):
         self.F = F
         self.k = k
         self.alpha_t = alpha
+        self.biort = biort
         if alpha == 'impulse':
             self.alpha = nn.Parameter(
                 random_postconv_impulse(7*C, F), requires_grad=False)
@@ -134,8 +137,8 @@ class InvariantLayerj1(nn.Module):
 
     def __repr__(self):
        return self._get_name() + \
-           '({}, {}, stride={}, k={}, alpha={})'.format(
-               self.C, self.F, self.stride, self.k, self.alpha_t)
+           '({}, {}, stride={}, k={}, alpha={}, biort={})'.format(
+               self.C, self.F, self.stride, self.k, self.alpha_t, self.biort)
 
 
 class InvariantLayerj1_dct(nn.Module):
@@ -157,7 +160,7 @@ class InvariantLayerj1_dct(nn.Module):
     """
     def __init__(self, C, F, stride=2):
         super().__init__()
-        self.scat = ScatLayerj1(stride=stride)
+        self.scat = ScatLayerj1()
         self.A1 = nn.Parameter(torch.randn(C*7, F, 1, 1))
         self.A2 = nn.Parameter(torch.randn(C*7, F, 1, 1))
         self.A3 = nn.Parameter(torch.randn(C*7, F, 1, 1))
