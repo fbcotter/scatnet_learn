@@ -375,7 +375,7 @@ if __name__ == "__main__":
             type_ = 'ref2'
         else:
             type_ = args.type[0]
-        cfg = {'args': args, 'type': type_, 'biort': 'near_sym_b_bp'}
+        cfg = {'args': args, 'type': type_, 'biort': 'near_sym_a'}
         trn = TrainNET(cfg)
         elapsed_time = 0
 
