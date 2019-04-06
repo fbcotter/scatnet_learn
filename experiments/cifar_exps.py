@@ -302,7 +302,7 @@ class TrainNET(BaseClass):
                 seed=args.seed, **kwargs)
         elif args.dataset == 'tiny_imagenet':
             self.train_loader, self.test_loader = tiny_imagenet.get_data(
-                64, args.data_dir, val_only=args.testOnly,
+                64, args.datadir, val_only=False,
                 batch_size=args.batch_size, trainsize=args.trainsize,
                 seed=args.seed, distributed=False, **kwargs)
 
@@ -316,7 +316,7 @@ class TrainNET(BaseClass):
         elif type_ in nets1.keys():
             θ = (0.5, 0.85, 1e-4, 1)
         elif type_ in nets2.keys():
-            θ = (0.5, 0.80, 1e-4, 1)
+            θ = (0.2, 0.90, 1e-4, 1)
         elif type_ == 'invall':
             θ = (0.5, 0.70, 1e-4, 1)
         else:
@@ -435,16 +435,20 @@ if __name__ == "__main__":
             type_ = list(nets.keys()) + ['ref2',]
 
         m, b = linear_func(0.1, 0.9, 0.7, 0.75)
+        if args.dataset.startswith('cifar'):
+            gpus = 0.5
+        else:
+            gpus = 1
         tune.run_experiments(
             {
                 exp_name: {
                     "stop": {
                         #  "mean_accuracy": 0.95,
-                        "training_iteration": 1 if args.smoke_test else 120,
+                        "training_iteration": 1 if args.smoke_test else args.epochs,
                     },
                     "resources_per_trial": {
                         "cpu": 1,
-                        "gpu": 0 if args.cpu else 0.5
+                        "gpu": 0 if args.cpu else gpus
                     },
                     "run": TrainNET,
                     #  "num_samples": 1 if args.smoke_test else 40,
@@ -453,7 +457,6 @@ if __name__ == "__main__":
                     "config": {
                         "args": args,
                         "type": tune.grid_search(type_),
-                        "biort": tune.grid_search(['near_sym_a', 'near_sym_b_bp'])
                         #  "lr": tune.sample_from(lambda spec: np.random.uniform(
                             #  0.1, 0.7
                         #  )),
