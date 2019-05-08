@@ -195,43 +195,58 @@ class ScatLayerj1_f(torch.autograd.Function):
         ctx.extra_rows = 0
         ctx.extra_cols = 0
 
-        # Do the single scale DTCWT
-        # If the row/col count of X is not divisible by 2 then we need to
-        # extend X
-        if r % 2 != 0:
-            x = torch.cat((x, x[:,:,-1:]), dim=2)
-            ctx.extra_rows = 1
-        if c % 2 != 0:
-            x = torch.cat((x, x[:,:,:,-1:]), dim=3)
-            ctx.extra_cols = 1
+        with torch.no_grad():
+            # Do the single scale DTCWT
+            # If the row/col count of X is not divisible by 2 then we need to
+            # extend X
+            if r % 2 != 0:
+                x = torch.cat((x, x[:,:,-1:]), dim=2)
+                ctx.extra_rows = 1
+            if c % 2 != 0:
+                x = torch.cat((x, x[:,:,:,-1:]), dim=3)
+                ctx.extra_cols = 1
 
-        # Level 1 forward (biorthogonal analysis filters)
-        Lo = rowfilter(x, h0o)
-        Hi = rowfilter(x, h1o)
-        LoHi = colfilter(Lo, h1o)
-        HiLo = colfilter(Hi, h0o)
-        HiHi = colfilter(Hi, h1o)
-        LoLo = colfilter(Lo, h0o)
-        LoLo = F.avg_pool2d(LoLo, 2)
+            # Level 1 forward (biorthogonal analysis filters)
+            Lo = rowfilter(x, h0o)
+            LoHi = colfilter(Lo, h1o)
+            LoLo = colfilter(Lo, h0o)
+            LoLo = F.avg_pool2d(LoLo, 2)
+            Hi = rowfilter(x, h1o)
+            HiLo = colfilter(Hi, h0o)
+            HiHi = colfilter(Hi, h1o)
 
-        # Convert quads to real and imaginary
-        (deg15r, deg15i), (deg165r, deg165i) = q2c(LoHi)
-        (deg45r, deg45i), (deg135r, deg135i) = q2c(HiHi)
-        (deg75r, deg75i), (deg105r, deg105i) = q2c(HiLo)
+            # Clear up variables as we go.
+            # We must be quite aggressive with this as the
+            # DTCWT based scatternet allocates several times the amount of
+            # needed memory. PyTorch will automatically clean it all up once we
+            # return from this function, but this may be too late for large
+            # tensors.
+            del Lo, Hi
 
-        # Convert real and imaginary to magnitude
-        reals = torch.stack(
-            [deg15r, deg45r, deg75r, deg105r, deg135r, deg165r], dim=1)
-        imags = torch.stack(
-            [deg15i, deg45i, deg75i, deg105i, deg135i, deg165i], dim=1)
-        val = torch.sqrt(reals**2 + imags**2 + bias**2)
-        mags = val - bias
-        if x.requires_grad:
-            θ = torch.atan2(imags, reals)
-            ctx.save_for_backward(h0o, h1o, θ)
-        else:
-            ctx.save_for_backward(h0o, h1o, torch.tensor(0.))
-        Z = torch.cat((LoLo[:, None], mags), dim=1)
+            # Convert quads to real and imaginary
+            (deg15r, deg15i), (deg165r, deg165i) = q2c(LoHi)
+            (deg45r, deg45i), (deg135r, deg135i) = q2c(HiHi)
+            (deg75r, deg75i), (deg105r, deg105i) = q2c(HiLo)
+            del LoHi, HiHi, HiLo
+
+            # Convert real and imaginary to magnitude
+            reals = torch.stack(
+                [deg15r, deg45r, deg75r, deg105r, deg135r, deg165r], dim=1)
+            del deg15r, deg45r, deg75r, deg105r, deg135r, deg165r
+            imags = torch.stack(
+                [deg15i, deg45i, deg75i, deg105i, deg135i, deg165i], dim=1)
+            del deg15i, deg45i, deg75i, deg105i, deg135i, deg165i
+
+            if x.requires_grad:
+                θ = torch.atan2(imags, reals)
+                ctx.save_for_backward(h0o, h1o, θ)
+            else:
+                ctx.save_for_backward(h0o, h1o, torch.tensor(0.))
+
+            mags = torch.sqrt(reals**2 + imags**2 + bias**2)
+            mags = mags - bias
+            del reals, imags
+            Z = torch.cat((LoLo[:, None], mags), dim=1)
 
         return Z
 
@@ -251,13 +266,17 @@ class ScatLayerj1_f(torch.autograd.Function):
 
             reals = dYm * torch.cos(θ)
             imags = dYm * torch.sin(θ)
+            del dYm
             lh = c2q((reals[:, 0], imags[:, 0]), (reals[:, 5], imags[:, 5]))
             hl = c2q((reals[:, 2], imags[:, 2]), (reals[:, 3], imags[:, 3]))
             hh = c2q((reals[:, 1], imags[:, 1]), (reals[:, 4], imags[:, 4]))
+            del reals, imags
 
             Hi = colfilter(hh, h1o_t) + colfilter(hl, h0o_t)
             Lo = colfilter(lh, h1o_t) + colfilter(ll, h0o_t)
+            del ll, lh, hl, hh
             dX = rowfilter(Hi, h1o_t) + rowfilter(Lo, h0o_t)
+            del Lo, Hi
 
             if ctx.extra_rows:
                 dX = dX[..., :-1, :]
@@ -301,25 +320,31 @@ class ScatLayerj1_rot_f(torch.autograd.Function):
         HiHi = colfilter(Ba, h2o)
         LoLo = colfilter(Lo, h0o)
         LoLo = F.avg_pool2d(LoLo, 2)
+        del Lo, Hi, Ba
 
         # Convert quads to real and imaginary
         (deg15r, deg15i), (deg165r, deg165i) = q2c(LoHi)
         (deg45r, deg45i), (deg135r, deg135i) = q2c(HiHi)
         (deg75r, deg75i), (deg105r, deg105i) = q2c(HiLo)
+        del LoHi, HiHi, HiLo
 
         # Convert real and imaginary to magnitude
         reals = torch.stack(
             [deg15r, deg45r, deg75r, deg105r, deg135r, deg165r], dim=1)
+        del deg15r, deg45r, deg75r, deg105r, deg135r, deg165r
         imags = torch.stack(
             [deg15i, deg45i, deg75i, deg105i, deg135i, deg165i], dim=1)
-        val = torch.sqrt(reals**2 + imags**2 + bias**2)
-        mags = val - bias
+        del deg15i, deg45i, deg75i, deg105i, deg135i, deg165i
 
-        # Save info for backwards pass
         if x.requires_grad:
             θ = torch.atan2(imags, reals)
             ctx.save_for_backward(h0o, h1o, h2o, θ)
+        else:
+            ctx.save_for_backward(h0o, h1o, h2o, torch.tensor(0.))
 
+        mags = torch.sqrt(reals**2 + imags**2 + bias**2)
+        mags = mags - bias
+        del reals, imags
         Z = torch.cat((LoLo[:, None], mags), dim=1)
 
         return Z
@@ -338,14 +363,18 @@ class ScatLayerj1_rot_f(torch.autograd.Function):
 
             reals = dYm * torch.cos(θ)
             imags = dYm * torch.sin(θ)
+            del dYm
             lh = c2q((reals[:, 0], imags[:, 0]), (reals[:, 5], imags[:, 5]))
             hl = c2q((reals[:, 2], imags[:, 2]), (reals[:, 3], imags[:, 3]))
             hh = c2q((reals[:, 1], imags[:, 1]), (reals[:, 4], imags[:, 4]))
+            del reals, imags
 
             Lo = colfilter(lh, h1o) + colfilter(ll, h0o)
             Hi = colfilter(hl, h0o)
             Ba = colfilter(hh, h2o)
+            del ll, lh, hl, hh
             dX = rowfilter(Hi, h1o) + rowfilter(Lo, h0o) + rowfilter(Ba, h2o)
+            del Lo, Hi, Ba
 
             if ctx.extra_rows:
                 dX = dX[..., :-1, :]
