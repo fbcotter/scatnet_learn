@@ -260,6 +260,8 @@ def get_data(in_size, data_dir, dataset='cifar10', batch_size=128,
             transform=transform_test)
 
     # Set the loader initializer seeds for reproducibility
+    if seed is None:
+        seed = random.randint(0, 10000)
     def worker_init_fn(id):
         import random
         import numpy as np

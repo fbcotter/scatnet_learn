@@ -1,10 +1,47 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as func
-from scatnet_learn.lowlevel import biort as _biort, prep_filt
+from scatnet_learn.lowlevel import biort as _biort, prep_filt, mode_to_int
 from scatnet_learn.lowlevel import ScatLayerj1_f, ScatLayerj1_rot_f
+from pytorch_wavelets import DTCWTForward
 import torch.nn.init as init
 import numpy as np
+
+
+class SmoothMagFn(torch.autograd.Function):
+    """ Class to do complex magnitude """
+    @staticmethod
+    def forward(ctx, x, b, ri_dim):
+        ctx.ri_dim = ri_dim
+        x1, x2 = torch.unbind(x, dim=ri_dim)
+        val = torch.sqrt(x1**2 + x2**2 + b**2)
+        mag = val - b
+        if x.requires_grad:
+            dx1 = x1/val
+            dx2 = x2/val
+            ctx.save_for_backward(dx1, dx2)
+
+        return mag
+
+    @staticmethod
+    def backward(ctx, dy):
+        dx = None
+        if ctx.needs_input_grad[0]:
+            dx1, dx2 = ctx.saved_tensors
+            dx = torch.stack((dy*dx1, dy*dx2), dim=ctx.ri_dim)
+        return dx, None, None
+
+
+class MagReshape(nn.Module):
+    def __init__(self, b=0.01, ri_dim=-1):
+        super().__init__()
+        self.b = b
+        self.ri_dim = ri_dim
+
+    def forward(self, x):
+        mag = SmoothMagFn.apply(x, self.b, self.ri_dim)
+        b, _, c, h, w = mag.shape
+        return mag.view(b, 6*c, h, w)
 
 
 def random_postconv_impulse(C, F):
@@ -83,17 +120,18 @@ class InvariantLayerj1(nn.Module):
 
     """
     def __init__(self, C, F=None, stride=2, k=1, alpha=None,
-                 biort='near_sym_a'):
+                 biort='near_sym_a', mode='symmetric'):
         super().__init__()
         if F is None:
             F = 7*C
         if k > 1 and alpha is not None:
             raise ValueError("Only use alpha when k=1")
 
-        self.scat = ScatLayerj1(biort=biort)
+        self.scat = ScatLayerj1(biort=biort, mode=mode)
         self.stride = stride
         # Create the learned mixing weights and possibly the expansion kernel
         self.A = nn.Parameter(torch.randn(F, 7*C, k, k))
+        init.xavier_uniform_(self.A)
         self.b = nn.Parameter(torch.zeros(F,))
         self.C = C
         self.F = F
@@ -123,22 +161,47 @@ class InvariantLayerj1(nn.Module):
         z = self.scat(x)
         As = self.A * self.alpha
         y = func.conv2d(z, As, self.b, padding=self.pad)
-        y = func.relu(y)
+        #  y = func.relu(y)
         if self.stride == 1:
             y = func.interpolate(y, scale_factor=2, mode='bilinear',
                                  align_corners=False)
         return y
 
-    def init(self, gain=1, method='xavier_uniform'):
-        if method == 'xavier_uniform':
-            init.xavier_uniform_(self.A, gain=gain)
-        else:
-            init.xavier_normal_(self.A, gain=gain)
-
     def __repr__(self):
        return self._get_name() + \
            '({}, {}, stride={}, k={}, alpha={}, biort={})'.format(
                self.C, self.F, self.stride, self.k, self.alpha_t, self.biort)
+
+
+class ScatLayer(nn.Module):
+    def __init__(self, C, stride=1, learn=True, resid=True):
+        super().__init__()
+        self.xfm = DTCWTForward(J=1, o_dim=1, ri_dim=2)
+        self.mag = MagReshape(b=0.01, ri_dim=2)
+        self.learn = learn
+        self.resid = resid
+        if learn:
+            self.gain = nn.Conv2d(C*7, C*7, 1, bias=False)
+            init.xavier_uniform_(self.gain.weight, gain=1.5)
+            self.bn = nn.BatchNorm2d(C*7)
+        assert abs(stride) == 1 or stride == 2, "Limited resampling at the moment"
+        self.stride = stride
+
+    def forward(self, x):
+        yl, (yh,) = self.xfm(x)
+        yhm = self.mag(yh)
+        #  y = torch.cat((yl[:, :, ::2, ::2], yhm), dim=1)
+        y = torch.cat((func.avg_pool2d(yl, 2), yhm), dim=1)
+        if self.learn:
+            if self.resid:
+                y = y + func.relu(self.bn(self.gain(y)))
+            else:
+                y = func.relu(self.bn(self.gain(y)))
+
+        if self.stride == 1:
+            y = func.interpolate(y, scale_factor=2, mode='bilinear',
+                                 align_corners=False)
+        return y
 
 
 class InvariantLayerj1_dct(nn.Module):
@@ -170,6 +233,9 @@ class InvariantLayerj1_dct(nn.Module):
         self.h = nn.Parameter(h, requires_grad=False)
         self.v = nn.Parameter(v, requires_grad=False)
         self.stride = stride
+        init.xavier_uniform_(self.A1)
+        init.xavier_uniform_(self.A2)
+        init.xavier_uniform_(self.A3)
 
     def forward(self, x):
         A1 = self.A1 * self.lp
@@ -186,11 +252,6 @@ class InvariantLayerj1_dct(nn.Module):
             y = func.interpolate(y, scale_factor=2, mode='bilinear',
                                  align_corners=False)
         return y
-
-    def init(self, gain=1, method='xavier_uniform'):
-        init.xavier_uniform_(self.A1, gain=gain)
-        init.xavier_uniform_(self.A2, gain=gain)
-        init.xavier_uniform_(self.A3, gain=gain)
 
 
 class InvariantLayerj1_compress(nn.Module):
@@ -250,6 +311,7 @@ class ScatLayerj1(nn.Module):
             use the rotationally symmetric filters. These have 13 and 19 taps
             so are quite long. They also require 7 1D convolutions instead of 6.
         x (torch.tensor): Input of shape (N, C, H, W)
+        mode (str): padding mode. Can be 'symmetric' or 'zero'
 
     Returns:
         y (torch.tensor): y has the lowpass and invariant U terms stacked along
@@ -257,24 +319,29 @@ class ScatLayerj1(nn.Module):
             the first C channels are the lowpass outputs, and the next 6C are
             the magnitude highpass outputs.
     """
-    def __init__(self, biort='near_sym_a'):
+    def __init__(self, biort='near_sym_a', mode='symmetric'):
         super().__init__()
         self.biort = biort
+        # Have to convert the string to an int as the grad checks don't work
+        # with string inputs
+        self.mode = mode_to_int(mode)
         if biort == 'near_sym_b_bp':
+            self.bandpass_diag = True
             h0o, _, h1o, _, h2o, _ = _biort(biort)
             self.h0o = torch.nn.Parameter(prep_filt(h0o, 1), False)
             self.h1o = torch.nn.Parameter(prep_filt(h1o, 1), False)
             self.h2o = torch.nn.Parameter(prep_filt(h2o, 1), False)
-            self.scat = lambda x: ScatLayerj1_rot_f.apply(
-                x, self.h0o, self.h1o, self.h2o)
         else:
+            self.bandpass_diag = False
             h0o, _, h1o, _ = _biort(biort)
             self.h0o = torch.nn.Parameter(prep_filt(h0o, 1), False)
             self.h1o = torch.nn.Parameter(prep_filt(h1o, 1), False)
-            self.scat = lambda x: ScatLayerj1_f.apply(x, self.h0o, self.h1o)
 
     def forward(self, x):
-        Z = self.scat(x)
+        if self.bandpass_diag:
+            Z = ScatLayerj1_rot_f.apply(x, self.h0o, self.h1o, self.h2o, self.mode)
+        else:
+            Z = ScatLayerj1_f.apply(x, self.h0o, self.h1o, self.mode)
         b, _, c, h, w = Z.shape
         Z = Z.view(b, 7*c, h, w)
         return Z

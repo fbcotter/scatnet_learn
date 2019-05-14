@@ -11,9 +11,9 @@ parser.add_argument('--no-grad', action='store_true',
                     help='Dont calculate the gradients')
 parser.add_argument('-J', type=int, default=2,
                     help='number of scales of transform to do')
-parser.add_argument('--batch', default=128, type=int,
+parser.add_argument('--batch', default=4, type=int,
                     help='Number of images in parallel')
-parser.add_argument('-C', default=3, type=int,
+parser.add_argument('-C', default=100, type=int,
                     help='Number of channels')
 parser.add_argument('-s', '--size', default=0, type=int,
                     help='spatial size of input')
@@ -65,13 +65,12 @@ def fwd(size, no_grad, J=2, dev='cuda'):
     # Do the transform
     y = xfm(x)
     cachedy = torch.cuda.memory_cached()
-    memy = torch.cuda.memory_allocated() - memx
+    memy = torch.cuda.memory_allocated()
 
     # Do backwards pass
     if not no_grad:
         y.backward(torch.ones_like(y))
-        mem = torch.cuda.memory_allocated() - memy
-        mem = memy - torch.cuda.memory_allocated()
+        mem = torch.cuda.memory_allocated()
         cached = torch.cuda.memory_cached()
 
     print('input tensor size: {:.1f}MiB'.format(memx / 2**20))
@@ -90,7 +89,7 @@ if __name__ == "__main__":
     if args.size > 0:
         size = (args.batch, args.C, args.size, args.size)
     else:
-        size = (args.batch, args.C, 128, 128)
+        size = (args.batch, args.C, 256, 256)
 
     if args.ref:
         y = reference(size, args.no_grad, args.J, args.device)

@@ -8,6 +8,44 @@ from pkg_resources import resource_stream
 COEFF_CACHE = {}
 
 
+def mode_to_int(mode):
+    if mode == 'zero':
+        return 0
+    elif mode == 'symmetric':
+        return 1
+    elif mode == 'per' or mode == 'periodization':
+        return 2
+    elif mode == 'constant':
+        return 3
+    elif mode == 'reflect':
+        return 4
+    elif mode == 'replicate':
+        return 5
+    elif mode == 'periodic':
+        return 6
+    else:
+        raise ValueError("Unkown pad type: {}".format(mode))
+
+
+def int_to_mode(mode):
+    if mode == 0:
+        return 'zero'
+    elif mode == 1:
+        return 'symmetric'
+    elif mode == 2:
+        return 'periodization'
+    elif mode == 3:
+        return 'constant'
+    elif mode == 4:
+        return 'reflect'
+    elif mode == 5:
+        return 'replicate'
+    elif mode == 6:
+        return 'periodic'
+    else:
+        raise ValueError("Unkown pad type: {}".format(mode))
+
+
 def q2c(y):
     """
     Convert from quads in y to complex numbers in z.
@@ -91,23 +129,31 @@ def symm_pad_1d(l, m):
     return xe
 
 
-def colfilter(X, h):
-    if X is None or X.shape == torch.Size([0]):
+def colfilter(X, h, mode='symmetric'):
+    if X is None or X.shape == torch.Size([]):
         return torch.zeros(1,1,1,1, device=X.device)
     ch, r = X.shape[1:3]
     m = h.shape[2] // 2
-    xe = symm_pad_1d(r, m)
-    return F.conv2d(X[:,:,xe], h.repeat(ch,1,1,1), groups=ch)
+    if mode == 'symmetric':
+        xe = symm_pad_1d(r, m)
+        y = F.conv2d(X[:,:,xe], h.repeat(ch,1,1,1), groups=ch)
+    else:
+        y = F.conv2d(X, h.repeat(ch, 1, 1, 1), groups=ch, padding=(m, 0))
+    return y
 
 
-def rowfilter(X, h):
-    if X is None or X.shape == torch.Size([0]):
+def rowfilter(X, h, mode='symmetric'):
+    if X is None or X.shape == torch.Size([]):
         return torch.zeros(1,1,1,1, device=X.device)
     ch, _, c = X.shape[1:]
     m = h.shape[2] // 2
-    xe = symm_pad_1d(c, m)
     h = h.transpose(2,3).contiguous()
-    return F.conv2d(X[:,:,:,xe], h.repeat(ch,1,1,1), groups=ch)
+    if mode == 'symmetric':
+        xe = symm_pad_1d(c, m)
+        y = F.conv2d(X[:,:,:,xe], h.repeat(ch,1,1,1), groups=ch)
+    else:
+        y = F.conv2d(X, h.repeat(ch,1,1,1), groups=ch, padding=(0, m))
+    return y
 
 
 def _load_from_file(basename, varnames):
@@ -187,13 +233,15 @@ class ScatLayerj1_f(torch.autograd.Function):
     layer with the DTCWT biorthogonal filters. """
 
     @staticmethod
-    def forward(ctx, x, h0o, h1o):
-        bias = 1e-5
+    def forward(ctx, x, h0o, h1o, mode):
+        bias = 1e-2
         #  bias = 0
         ctx.in_shape = x.shape
         batch, ch, r, c = x.shape
         ctx.extra_rows = 0
         ctx.extra_cols = 0
+        mode = int_to_mode(mode)
+        ctx.mode = mode
 
         with torch.no_grad():
             # Do the single scale DTCWT
@@ -207,13 +255,13 @@ class ScatLayerj1_f(torch.autograd.Function):
                 ctx.extra_cols = 1
 
             # Level 1 forward (biorthogonal analysis filters)
-            Lo = rowfilter(x, h0o)
-            LoHi = colfilter(Lo, h1o)
-            LoLo = colfilter(Lo, h0o)
+            Lo = rowfilter(x, h0o, mode)
+            LoHi = colfilter(Lo, h1o, mode)
+            LoLo = colfilter(Lo, h0o, mode)
             LoLo = F.avg_pool2d(LoLo, 2)
-            Hi = rowfilter(x, h1o)
-            HiLo = colfilter(Hi, h0o)
-            HiHi = colfilter(Hi, h1o)
+            Hi = rowfilter(x, h1o, mode)
+            HiLo = colfilter(Hi, h0o, mode)
+            HiHi = colfilter(Hi, h1o, mode)
 
             # Clear up variables as we go.
             # We must be quite aggressive with this as the
@@ -237,13 +285,16 @@ class ScatLayerj1_f(torch.autograd.Function):
                 [deg15i, deg45i, deg75i, deg105i, deg135i, deg165i], dim=1)
             del deg15i, deg45i, deg75i, deg105i, deg135i, deg165i
 
-            if x.requires_grad:
-                θ = torch.atan2(imags, reals)
-                ctx.save_for_backward(h0o, h1o, θ)
-            else:
-                ctx.save_for_backward(h0o, h1o, torch.tensor(0.))
-
             mags = torch.sqrt(reals**2 + imags**2 + bias**2)
+            if x.requires_grad:
+                dx1 = reals/mags
+                dx2 = imags/mags
+                ctx.save_for_backward(h0o, h1o, dx1, dx2)
+                #  θ = torch.atan2(imags, reals)
+                #  ctx.save_for_backward(h0o, h1o, θ)
+            else:
+                ctx.save_for_backward(h0o, h1o, torch.tensor(0.), torch.tensor(0.))
+
             mags = mags - bias
             del reals, imags
             Z = torch.cat((LoLo[:, None], mags), dim=1)
@@ -253,9 +304,11 @@ class ScatLayerj1_f(torch.autograd.Function):
     @staticmethod
     def backward(ctx, dZ):
         dX = None
+        mode = ctx.mode
 
         if ctx.needs_input_grad[0]:
-            h0o, h1o, θ = ctx.saved_tensors
+            #  h0o, h1o, θ = ctx.saved_tensors
+            h0o, h1o, dxr, dxi = ctx.saved_tensors
             # Use the special properties of the filters to get the time reverse
             h0o_t = h0o
             h1o_t = h1o
@@ -264,18 +317,20 @@ class ScatLayerj1_f(torch.autograd.Function):
             dYl, dYm = dZ[:,0], dZ[:,1:]
             ll = 1/4 * F.interpolate(dYl, scale_factor=2, mode="nearest")
 
-            reals = dYm * torch.cos(θ)
-            imags = dYm * torch.sin(θ)
+            reals = dYm * dxr
+            imags = dYm * dxi
+            #  reals = dYm * torch.cos(θ)
+            #  imags = dYm * torch.sin(θ)
             del dYm
             lh = c2q((reals[:, 0], imags[:, 0]), (reals[:, 5], imags[:, 5]))
             hl = c2q((reals[:, 2], imags[:, 2]), (reals[:, 3], imags[:, 3]))
             hh = c2q((reals[:, 1], imags[:, 1]), (reals[:, 4], imags[:, 4]))
             del reals, imags
 
-            Hi = colfilter(hh, h1o_t) + colfilter(hl, h0o_t)
-            Lo = colfilter(lh, h1o_t) + colfilter(ll, h0o_t)
+            Hi = colfilter(hh, h1o_t, mode) + colfilter(hl, h0o_t, mode)
+            Lo = colfilter(lh, h1o_t, mode) + colfilter(ll, h0o_t, mode)
             del ll, lh, hl, hh
-            dX = rowfilter(Hi, h1o_t) + rowfilter(Lo, h0o_t)
+            dX = rowfilter(Hi, h1o_t, mode) + rowfilter(Lo, h0o_t, mode)
             del Lo, Hi
 
             if ctx.extra_rows:
@@ -292,8 +347,10 @@ class ScatLayerj1_rot_f(torch.autograd.Function):
     filters, i.e. a slightly more expensive operation."""
 
     @staticmethod
-    def forward(ctx, x, h0o, h1o, h2o):
+    def forward(ctx, x, h0o, h1o, h2o, mode):
         bias = 1e-5
+        mode = int_to_mode(mode)
+        ctx.mode = mode
         #  bias = 0
         ctx.in_shape = x.shape
         batch, ch, r, c = x.shape
@@ -311,14 +368,14 @@ class ScatLayerj1_rot_f(torch.autograd.Function):
             ctx.extra_cols = 1
 
         # Level 1 forward (biorthogonal analysis filters)
-        Lo = rowfilter(x, h0o)
-        Hi = rowfilter(x, h1o)
-        Ba = rowfilter(x, h2o)
+        Lo = rowfilter(x, h0o, mode)
+        Hi = rowfilter(x, h1o, mode)
+        Ba = rowfilter(x, h2o, mode)
 
-        LoHi = colfilter(Lo, h1o)
-        HiLo = colfilter(Hi, h0o)
-        HiHi = colfilter(Ba, h2o)
-        LoLo = colfilter(Lo, h0o)
+        LoHi = colfilter(Lo, h1o, mode)
+        HiLo = colfilter(Hi, h0o, mode)
+        HiHi = colfilter(Ba, h2o, mode)
+        LoLo = colfilter(Lo, h0o, mode)
         LoLo = F.avg_pool2d(LoLo, 2)
         del Lo, Hi, Ba
 
@@ -352,6 +409,7 @@ class ScatLayerj1_rot_f(torch.autograd.Function):
     @staticmethod
     def backward(ctx, dZ):
         dX = None
+        mode = ctx.mode
 
         if ctx.needs_input_grad[0]:
             # Don't need to do time reverse as these filters are symmetric
@@ -369,11 +427,12 @@ class ScatLayerj1_rot_f(torch.autograd.Function):
             hh = c2q((reals[:, 1], imags[:, 1]), (reals[:, 4], imags[:, 4]))
             del reals, imags
 
-            Lo = colfilter(lh, h1o) + colfilter(ll, h0o)
-            Hi = colfilter(hl, h0o)
-            Ba = colfilter(hh, h2o)
+            Lo = colfilter(lh, h1o, mode) + colfilter(ll, h0o, mode)
+            Hi = colfilter(hl, h0o, mode)
+            Ba = colfilter(hh, h2o, mode)
             del ll, lh, hl, hh
-            dX = rowfilter(Hi, h1o) + rowfilter(Lo, h0o) + rowfilter(Ba, h2o)
+            dX = rowfilter(Hi, h1o, mode) + rowfilter(Lo, h0o, mode) + \
+                rowfilter(Ba, h2o, mode)
             del Lo, Hi, Ba
 
             if ctx.extra_rows:

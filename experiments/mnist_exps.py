@@ -26,6 +26,23 @@ parser.add_argument('--smoke-test', action="store_true",
                     help="Finish quickly for testing")
 
 
+def net_init(m, gain=1):
+    classname = m.__class__.__name__
+    if (classname.find('Conv') != -1) or (classname.find('Linear') != -1):
+        init.xavier_uniform_(m.weight, gain=np.sqrt(2))
+        try:
+            init.constant_(m.bias, 0)
+        # Can get an attribute error if no bias to learn
+        except AttributeError:
+            pass
+    elif classname.find('InvariantLayerj1_dct') != -1:
+        init.xavier_uniform_(m.A1, gain=gain)
+        init.xavier_uniform_(m.A2, gain=gain)
+        init.xavier_uniform_(m.A3, gain=gain)
+    elif classname.find('InvariantLayerj1') != -1:
+        init.xavier_uniform_(m.A, gain=gain)
+
+
 class InvNet_shift(nn.Module):
     def __init__(self, C1=7, C2=49, shift='random'):
         super().__init__()
@@ -51,13 +68,6 @@ class InvNet_shift(nn.Module):
         y = self.fc2(y)
         return func.log_softmax(y, dim=1)
 
-    def init(self, std=1):
-        for child in self.children():
-            try:
-                child.init(std)
-            except AttributeError:
-                pass
-
 
 class InvNet(nn.Module):
     def __init__(self, C1=7, C2=49, k=1):
@@ -80,13 +90,6 @@ class InvNet(nn.Module):
         y = self.fc2(y)
         return func.log_softmax(y, dim=1)
 
-    def init(self, std=1):
-        for child in self.children():
-            try:
-                child.init(std)
-            except AttributeError:
-                pass
-
 
 class ConvNet(nn.Module):
     def __init__(self, C1=7, C2=49, k=3):
@@ -107,12 +110,6 @@ class ConvNet(nn.Module):
         y = func.relu(self.fc1(x))
         y = self.fc2(y)
         return func.log_softmax(y, dim=1)
-
-    def init(self, std=1):
-        for child in self.children():
-            classname = child.__class__.__name__
-            if classname.find('Conv') != -1:
-                init.xavier_uniform_(child.weight, gain=std)
 
 
 class TrainMNIST(Trainable):
@@ -210,7 +207,8 @@ class TrainMNIST(Trainable):
         mom = config.get('mom', mom)
         wd = config.get('wd', wd)
         std = config.get('std', std)
-        self.model.init(std)
+        init = lambda x: net_init(x, std)
+        self.model.apply(init)
         self.model.cuda()
 
         self.optimizer = optim.SGD(
