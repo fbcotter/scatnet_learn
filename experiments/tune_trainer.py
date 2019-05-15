@@ -1,3 +1,10 @@
+"""
+This module creates a Ray Tune training class. In particular, it makes
+scaffolding for running single epochs of training, testing, saving and loading
+models. The Trainable class is then used in the experiment code with the
+schedulers, but it can also be used without the scheduler.
+"""
+
 from ray.tune import Trainable
 import time
 import torch.nn.functional as func
@@ -5,6 +12,26 @@ import numpy as np
 import torch
 import sys
 import os
+
+import torch.nn.init as init
+
+
+def net_init(m, gain=1):
+    """ Function to initialize the networks. Needed by all experiments """
+    classname = m.__class__.__name__
+    if (classname.find('Conv') != -1) or (classname.find('Linear') != -1):
+        init.xavier_uniform_(m.weight, gain=np.sqrt(2))
+        try:
+            init.constant_(m.bias, 0)
+        # Can get an attribute error if no bias to learn
+        except AttributeError:
+            pass
+    elif classname.find('InvariantLayerj1_dct') != -1:
+        init.xavier_uniform_(m.A1, gain=gain)
+        init.xavier_uniform_(m.A2, gain=gain)
+        init.xavier_uniform_(m.A3, gain=gain)
+    elif classname.find('InvariantLayerj1') != -1:
+        init.xavier_uniform_(m.A, gain=gain)
 
 
 def get_hms(seconds):
@@ -116,13 +143,13 @@ class BaseClass(Trainable):
             output = self.model(data)
             loss = func.nll_loss(output, target)
             # Get the regularization loss directly from the network
-            try:
-                loss += self.model.get_reg()
-            except AttributeError:
-                try:
-                    loss += self.model.module.get_reg()
-                except AttributeError:
-                    pass
+            #  try:
+                #  loss += self.model.get_reg()
+            #  except AttributeError:
+                #  try:
+                    #  loss += self.model.module.get_reg()
+                #  except AttributeError:
+                    #  pass
             loss.backward()
             self.opt_step()
             corrects, bs = num_correct(output.data, target, topk=(1,5))

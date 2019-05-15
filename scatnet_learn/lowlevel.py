@@ -293,7 +293,8 @@ class ScatLayerj1_f(torch.autograd.Function):
                 #  θ = torch.atan2(imags, reals)
                 #  ctx.save_for_backward(h0o, h1o, θ)
             else:
-                ctx.save_for_backward(h0o, h1o, torch.tensor(0.), torch.tensor(0.))
+                ctx.save_for_backward(h0o, h1o,
+                                      torch.tensor(0.), torch.tensor(0.))
 
             mags = mags - bias
             del reals, imags
@@ -316,7 +317,6 @@ class ScatLayerj1_f(torch.autograd.Function):
             # Level 1 backward (time reversed biorthogonal analysis filters)
             dYl, dYm = dZ[:,0], dZ[:,1:]
             ll = 1/4 * F.interpolate(dYl, scale_factor=2, mode="nearest")
-
             reals = dYm * dxr
             imags = dYm * dxi
             #  reals = dYm * torch.cos(θ)
@@ -393,13 +393,16 @@ class ScatLayerj1_rot_f(torch.autograd.Function):
             [deg15i, deg45i, deg75i, deg105i, deg135i, deg165i], dim=1)
         del deg15i, deg45i, deg75i, deg105i, deg135i, deg165i
 
-        if x.requires_grad:
-            θ = torch.atan2(imags, reals)
-            ctx.save_for_backward(h0o, h1o, h2o, θ)
-        else:
-            ctx.save_for_backward(h0o, h1o, h2o, torch.tensor(0.))
-
         mags = torch.sqrt(reals**2 + imags**2 + bias**2)
+        if x.requires_grad:
+            dx1 = reals/mags
+            dx2 = imags/mags
+            ctx.save_for_backward(h0o, h1o, h2o, dx1, dx2)
+            #  θ = torch.atan2(imags, reals)
+            #  ctx.save_for_backward(h0o, h1o, h2o, θ)
+        else:
+            ctx.save_for_backward(h0o, h1o, h2o,
+                                  torch.tensor(0.), torch.tensor(0.))
         mags = mags - bias
         del reals, imags
         Z = torch.cat((LoLo[:, None], mags), dim=1)
@@ -413,14 +416,17 @@ class ScatLayerj1_rot_f(torch.autograd.Function):
 
         if ctx.needs_input_grad[0]:
             # Don't need to do time reverse as these filters are symmetric
-            h0o, h1o, h2o, θ = ctx.saved_tensors
+            #  h0o, h1o, h2o, θ = ctx.saved_tensors
+            h0o, h1o, h2o, dxr, dxi = ctx.saved_tensors
 
             # Level 1 backward (time reversed biorthogonal analysis filters)
             dYl, dYm = dZ[:,0], dZ[:,1:]
             ll = 1/4 * F.interpolate(dYl, scale_factor=2, mode="nearest")
 
-            reals = dYm * torch.cos(θ)
-            imags = dYm * torch.sin(θ)
+            reals = dYm * dxr
+            imags = dYm * dxi
+            #  reals = dYm * torch.cos(θ)
+            #  imags = dYm * torch.sin(θ)
             del dYm
             lh = c2q((reals[:, 0], imags[:, 0]), (reals[:, 5], imags[:, 5]))
             hl = c2q((reals[:, 2], imags[:, 2]), (reals[:, 3], imags[:, 3]))

@@ -8,42 +8,6 @@ import torch.nn.init as init
 import numpy as np
 
 
-class SmoothMagFn(torch.autograd.Function):
-    """ Class to do complex magnitude """
-    @staticmethod
-    def forward(ctx, x, b, ri_dim):
-        ctx.ri_dim = ri_dim
-        x1, x2 = torch.unbind(x, dim=ri_dim)
-        val = torch.sqrt(x1**2 + x2**2 + b**2)
-        mag = val - b
-        if x.requires_grad:
-            dx1 = x1/val
-            dx2 = x2/val
-            ctx.save_for_backward(dx1, dx2)
-
-        return mag
-
-    @staticmethod
-    def backward(ctx, dy):
-        dx = None
-        if ctx.needs_input_grad[0]:
-            dx1, dx2 = ctx.saved_tensors
-            dx = torch.stack((dy*dx1, dy*dx2), dim=ctx.ri_dim)
-        return dx, None, None
-
-
-class MagReshape(nn.Module):
-    def __init__(self, b=0.01, ri_dim=-1):
-        super().__init__()
-        self.b = b
-        self.ri_dim = ri_dim
-
-    def forward(self, x):
-        mag = SmoothMagFn.apply(x, self.b, self.ri_dim)
-        b, _, c, h, w = mag.shape
-        return mag.view(b, 6*c, h, w)
-
-
 def random_postconv_impulse(C, F):
     """ Creates a random filter with +/- 1 in one location for a
     3x3 convolution. The idea being that we can randomly offset filters from
@@ -171,37 +135,6 @@ class InvariantLayerj1(nn.Module):
        return self._get_name() + \
            '({}, {}, stride={}, k={}, alpha={}, biort={})'.format(
                self.C, self.F, self.stride, self.k, self.alpha_t, self.biort)
-
-
-class ScatLayer(nn.Module):
-    def __init__(self, C, stride=1, learn=True, resid=True):
-        super().__init__()
-        self.xfm = DTCWTForward(J=1, o_dim=1, ri_dim=2)
-        self.mag = MagReshape(b=0.01, ri_dim=2)
-        self.learn = learn
-        self.resid = resid
-        if learn:
-            self.gain = nn.Conv2d(C*7, C*7, 1, bias=False)
-            init.xavier_uniform_(self.gain.weight, gain=1.5)
-            self.bn = nn.BatchNorm2d(C*7)
-        assert abs(stride) == 1 or stride == 2, "Limited resampling at the moment"
-        self.stride = stride
-
-    def forward(self, x):
-        yl, (yh,) = self.xfm(x)
-        yhm = self.mag(yh)
-        #  y = torch.cat((yl[:, :, ::2, ::2], yhm), dim=1)
-        y = torch.cat((func.avg_pool2d(yl, 2), yhm), dim=1)
-        if self.learn:
-            if self.resid:
-                y = y + func.relu(self.bn(self.gain(y)))
-            else:
-                y = func.relu(self.bn(self.gain(y)))
-
-        if self.stride == 1:
-            y = func.interpolate(y, scale_factor=2, mode='bilinear',
-                                 align_corners=False)
-        return y
 
 
 class InvariantLayerj1_dct(nn.Module):

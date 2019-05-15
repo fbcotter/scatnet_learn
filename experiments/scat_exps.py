@@ -7,17 +7,15 @@ import argparse
 import os
 import torch
 import torch.nn as nn
-import torch.nn.init as init
 import time
-from scatnet_learn.layers import InvariantLayerj1, ScatLayerj1, ScatLayer
+from scatnet_learn.layers import InvariantLayerj1, ScatLayerj1
 import torch.nn.functional as func
 import numpy as np
 import random
 from collections import OrderedDict
 from scatnet_learn.data import cifar, tiny_imagenet
 from scatnet_learn import optim
-from math import sqrt
-from tune_trainer import BaseClass, get_hms
+from tune_trainer import BaseClass, get_hms, net_init
 from tensorboardX import SummaryWriter
 
 # Training settings
@@ -54,30 +52,54 @@ parser.add_argument('--steps', default=[60,80,100], type=int, nargs='+')
 parser.add_argument('--gamma', default=0.2, type=float, help='Lr decay')
 
 
-def net_init(m, gain=1):
-    classname = m.__class__.__name__
-    if (classname.find('Conv') != -1) or (classname.find('Linear') != -1):
-        init.xavier_uniform_(m.weight, gain=np.sqrt(2))
-        try:
-            init.constant_(m.bias, 0)
-        # Can get an attribute error if no bias to learn
-        except AttributeError:
-            pass
-    elif classname.find('InvariantLayerj1_dct') != -1:
-        init.xavier_uniform_(m.A1, gain=gain)
-        init.xavier_uniform_(m.A2, gain=gain)
-        init.xavier_uniform_(m.A3, gain=gain)
-    elif classname.find('InvariantLayerj1') != -1:
-        init.xavier_uniform_(m.A, gain=gain)
+# Define the options of networks. The 4 parameters are:
+# (layer type, input channels, output channels, stride)
+#
+# The dictionary 'nets' has 14 different layouts of vgg nets networks with 0,
+# 1 or 2 invariant layers at different depths.
+# The dicionary 'nets2' is the same as 'nets' except we change the invariant
+# layer for an invariant layer with random shifts
+# The dicionary 'nets3' is the same as 'nets' except we change the invariant
+# layer for an invariant layer with a 3x3 convolution
+C = 96
+p = 0.3
+nets = {'ref': [('conv', 3, 21, 0), ('pool', 1, None, None),
+                ('conv', 21, 147, 0), ('pool', 2, None, None),
+                ('conv', 147, 2*C, p), ('conv', 2*C, 2*C, p),
+                ('conv', 2*C, 4*C, p), ('conv', 4*C, 4*C, p)],
+        'scatA':[('scat', 3, None, None), ('scat', 21, None, None),
+                 ('conv', 147, 2*C, p), ('conv', 2*C, 2*C, p),
+                 ('conv', 2*C, 4*C, p), ('conv', 4*C, 4*C, p)],
+        'scatB':[('inv', 3, 21, 2), ('inv', 21, 147, 2),
+                 ('conv', 147, 2*C, p), ('conv', 2*C, 2*C, p),
+                 ('conv', 2*C, 4*C, p), ('conv', 4*C, 4*C, p)],
+        'scatC':[('conv', 3, 16, 0),
+                 ('scat', 16, None, None), ('scat', 16*7, None, None),
+                 ('conv', 16*49, 2*C, p), ('conv', 2*C, 2*C, p),
+                 ('conv', 2*C, 4*C, p), ('conv', 4*C, 4*C, p)],
+        'scatD':[('conv', 3, 16, 0),
+                 ('inv', 16, 16*7, 2), ('inv', 16*7, 16*49, 2),
+                 ('conv', 16*49, 2*C, p), ('conv', 2*C, 2*C, p),
+                 ('conv', 2*C, 4*C, p), ('conv', 4*C, 4*C, p)],
+        'scatD1':[('conv', 3, 16, 0),
+                  ('inv', 16, 50, 2), ('inv', 50, 147, 2),
+                  ('conv', 147, 2*C, p), ('conv', 2*C, 2*C, p),
+                  ('conv', 2*C, 4*C, p), ('conv', 4*C, 4*C, p)],
+        'scatD2':[('conv', 3, 16, 0),
+                  ('inv', 16, 112, 2), ('inv', 112, 147, 2),
+                  ('conv', 147, 2*C, p), ('conv', 2*C, 2*C, p),
+                  ('conv', 2*C, 4*C, p), ('conv', 4*C, 4*C, p)],}
 
 
-class MyModule(nn.Module):
-    """ This is a wrapper for our networks that has some useful functions"""
-    def __init__(self, dataset):
+class ScatNet(nn.Module):
+    """ ScatNet is like a MixedNet but with a scattering front end (perhaps
+    with learning between the layers)
+    """
+    def __init__(self, dataset, type_, wd=0):
         super().__init__()
-        self.wd = 0
-        self.wd_fc = 0
-        self.reg = 'l2'
+        self.wd = wd
+        self.wd_fc = wd
+
         # Define the number of scales and classes dependent on the dataset
         if dataset == 'cifar10':
             self.num_classes = 10
@@ -89,72 +111,7 @@ class MyModule(nn.Module):
             self.num_classes = 200
             self.S = 4
 
-    def forward(self, x):
-        """ Define the default forward pass"""
-        out = self.net(x)
-        out = self.avg(out)
-        out = out.view(out.size(0), -1)
-        out = self.fc1(out)
-        return func.log_softmax(out, dim=-1)
-
-    def get_reg(self):
-        """ Define the default regularization scheme """
-        reg_loss = 0
-        for param in self.net.parameters():
-            if param.requires_grad:
-                if self.reg == 'l1':
-                    reg_loss += self.wd * torch.sum(torch.abs(param))
-                else:
-                    reg_loss += self.wd * torch.sum(param**2)
-        for param in self.fc1.parameters():
-            reg_loss += self.wd_fc * torch.sum(param**2)
-        return reg_loss
-
-
-
-# Define the options of networks. The 4 parameters are:
-# (layer type, input channels, output channels, stride)
-#
-# The dictionary 'nets' has 14 different layouts of vgg nets networks with 0,
-# 1 or 2 invariant layers at different depths.
-# The dicionary 'nets2' is the same as 'nets' except we change the invariant
-# layer for an invariant layer with random shifts
-# The dicionary 'nets3' is the same as 'nets' except we change the invariant
-# layer for an invariant layer with a 3x3 convolution
-C = 96
-p = 0
-nets = {'ref': [('conv', 3, 21, 0), ('pool', 1, None, None),
-                ('conv', 21, 147, 0), ('pool', 2, None, None),
-                ('conv', 147, 2*C, p), ('conv', 2*C, 2*C, p),
-                ('conv', 2*C, 4*C, p), ('conv', 4*C, 4*C, p)],
-        'scatA':[('scat', 3, None, None), ('scat', 21, None, None),
-                 ('conv', 147, 2*C, p), ('conv', 2*C, 2*C, p),
-                 ('conv', 2*C, 4*C, p), ('conv', 4*C, 4*C, p)],
-        'scatB':[('inv', 3, 21, 2), ('inv', 21, 147, 2),
-                 ('conv', 147, 2*C, p), ('conv', 2*C, 2*C, p),
-                 ('conv', 2*C, 4*C, p), ('conv', 4*C, 4*C, p)],
-        'scatC':[('conv', 3, 16, 0), ('scat', 16, None, None), ('scat', 16*7, None, None),
-                 ('conv', 16*49, 2*C, p), ('conv', 2*C, 2*C, p),
-                 ('conv', 2*C, 4*C, p), ('conv', 4*C, 4*C, p)],
-        'scatD':[('conv', 3, 16, 0), ('inv', 16, 16*7, 2), ('inv', 16*7, 16*49, 2),
-                 ('conv', 16*49, 2*C, p), ('conv', 2*C, 2*C, p),
-                 ('conv', 2*C, 4*C, p), ('conv', 4*C, 4*C, p)],
-        'scatD1':[('conv', 3, 16, 0), ('inv', 16, 50, 2), ('inv', 50, 147, 2),
-                 ('conv', 147, 2*C, p), ('conv', 2*C, 2*C, p),
-                 ('conv', 2*C, 4*C, p), ('conv', 4*C, 4*C, p)],
-        'scatD2':[('conv', 3, 16, 0), ('inv', 16, 112, 2), ('inv', 112, 147, 2),
-                 ('conv', 147, 2*C, p), ('conv', 2*C, 2*C, p),
-                 ('conv', 2*C, 4*C, p), ('conv', 4*C, 4*C, p)],}
-
-
-class ScatNet(MyModule):
-    """ ScatNet is like a MixedNet but with a scattering front end (perhaps
-    with learning between the layers)
-    """
-    def __init__(self, dataset, type_, wd=0, reg='l2'):
-        super().__init__(dataset)
-        self.wd = wd
-        self.reg = reg
+        # Build the selected net type by using the dictionary nets
         layers = nets[type_]
         blks = []
         layer = 0
@@ -166,7 +123,7 @@ class ScatNet(MyModule):
                 if drop_p > 0:
                     blk = nn.Sequential(
                         nn.Conv2d(C1, C2, 3, padding=1, stride=1, bias=False),
-                        nn.BatchNorm2d(C2), nn.Dropout2d(p=drop_p), nn.ReLU())
+                        nn.BatchNorm2d(C2), nn.Dropout(p=drop_p), nn.ReLU())
                 else:
                     blk = nn.Sequential(
                         nn.Conv2d(C1, C2, 3, padding=1, stride=1, bias=False),
@@ -185,12 +142,11 @@ class ScatNet(MyModule):
                 blk = nn.Sequential(InvariantLayerj1(C1, C2),
                                     nn.BatchNorm2d(C2),
                                     nn.ReLU())
-                #  blk = ScatLayer(C1, stride=2, learn=True, resid=False)
                 layer += 1
             # Add the name and block to the list
             blks.append((name, blk))
 
-        # C2 is the last output size from first 6 layers
+        # Build the common end point
         if dataset == 'cifar10' or dataset == 'cifar100':
             # Network is 3 stages of convolution
             self.net = nn.Sequential(OrderedDict(blks))
@@ -200,11 +156,11 @@ class ScatNet(MyModule):
             # Add 3 more layers to tiny imagenet
             blk1 = nn.MaxPool2d(2)
             blk2 = nn.Sequential(
-                nn.Conv2d(C2, 2*C2, 3, padding=1, stride=1),
+                nn.Conv2d(C2, 2*C2, 3, padding=1, stride=1, bias=False),
                 nn.BatchNorm2d(2*C2),
                 nn.ReLU())
             blk3 = nn.Sequential(
-                nn.Conv2d(2*C2, 2*C2, 3, padding=1, stride=1),
+                nn.Conv2d(2*C2, 2*C2, 3, padding=1, stride=1, bias=False),
                 nn.BatchNorm2d(2*C2),
                 nn.ReLU())
             blks = blks + [
@@ -214,6 +170,24 @@ class ScatNet(MyModule):
             self.net = nn.Sequential(OrderedDict(blks))
             self.avg = nn.AvgPool2d(8)
             self.fc1 = nn.Linear(2*C2, self.num_classes)
+
+    def get_reg(self):
+        """ Define the default regularization scheme """
+        reg_loss = 0
+        for param in self.net.parameters():
+            if param.requires_grad:
+                reg_loss += self.wd * torch.sum(param**2)
+        for param in self.fc1.parameters():
+            reg_loss += self.wd_fc * torch.sum(param**2)
+        return reg_loss
+
+    def forward(self, x):
+        """ Define the default forward pass"""
+        out = self.net(x)
+        out = self.avg(out)
+        out = out.view(out.size(0), -1)
+        out = self.fc1(out)
+        return func.log_softmax(out, dim=-1)
 
 
 class TrainNET(BaseClass):
@@ -279,7 +253,7 @@ class TrainNET(BaseClass):
         #  drop_p = config.get('drop_p', drop_p)
 
         # Build the network
-        self.model = ScatNet(args.dataset, type_, wd=wd)
+        self.model = ScatNet(args.dataset, type_, wd)
         init = lambda x: net_init(x, std)
         self.model.apply(init)
 
@@ -307,7 +281,7 @@ class TrainNET(BaseClass):
 
         self.optimizer, self.scheduler = optim.get_optim(
             'sgd', default_params, init_lr=lr,
-            steps=args.steps, wd=0, gamma=0.2, momentum=mom,
+            steps=args.steps, wd=wd, gamma=0.2, momentum=mom,
             max_epochs=args.epochs)
 
         if len(inv_params) > 0:
@@ -317,7 +291,7 @@ class TrainNET(BaseClass):
             wd1 = config.get('wd1', wd)
             self.optimizer1, self.scheduler1 = optim.get_optim(
                 'sgd', inv_params, init_lr=lr1,
-                steps=args.steps, wd=0, gamma=gamma1, momentum=mom1,
+                steps=args.steps, wd=wd1, gamma=gamma1, momentum=mom1,
                 max_epochs=args.epochs)
 
         if self.verbose:
@@ -437,18 +411,16 @@ if __name__ == "__main__":
                     "config": {
                         "args": args,
                         "type": tune.grid_search(type_),
-                        #  "lr": tune.sample_from(lambda spec: np.random.uniform(
-                            #  0.1, 0.7
-                        #  )),
+                        #  "lr": tune.sample_from(
+                        #      lambda spec: np.random.uniform(0.1, 0.7)),
                         #  "mom": tune.sample_from(
-                            #  lambda spec: m*spec.config.lr + b +
-                                #  0.05*np.random.randn()),
-                        #  "wd": tune.sample_from(lambda spec: np.random.uniform(
-                           #  1e-5, 5e-4
-                        #  ))
-                        #  "lr": tune.grid_search([0.01, 0.0316, 0.1, 0.316, 1]),
+                        #      lambda spec: m * spec.config.lr + b + \
+                        #      0.05*np.random.randn()),
+                        #  "wd": tune.sample_from(
+                        #      lambda spec: np.random.uniform(1e-5, 5e-4)),
+                        #  "lr": tune.grid_search([0.0316, 0.1, 0.316, 1]),
                         #  "momentum": tune.grid_search([0.7, 0.8, 0.9]),
-                        #  "wd": tune.grid_search([1e-5, 1e-1e-4]),
+                        #  "wd": tune.grid_search([1e-5, 1e-4]),
                         #  "std": tune.grid_search([0.5, 1., 1.5, 2.0])
                     }
                 }
