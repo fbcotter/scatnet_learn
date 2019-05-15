@@ -95,10 +95,8 @@ class ScatNet(nn.Module):
     """ ScatNet is like a MixedNet but with a scattering front end (perhaps
     with learning between the layers)
     """
-    def __init__(self, dataset, type_, wd=0):
+    def __init__(self, dataset, type_, b=1e-2):
         super().__init__()
-        self.wd = wd
-        self.wd_fc = wd
 
         # Define the number of scales and classes dependent on the dataset
         if dataset == 'cifar10':
@@ -157,12 +155,10 @@ class ScatNet(nn.Module):
             blk1 = nn.MaxPool2d(2)
             blk2 = nn.Sequential(
                 nn.Conv2d(C2, 2*C2, 3, padding=1, stride=1, bias=False),
-                nn.BatchNorm2d(2*C2),
-                nn.ReLU())
+                nn.BatchNorm2d(2*C2), nn.ReLU())
             blk3 = nn.Sequential(
                 nn.Conv2d(2*C2, 2*C2, 3, padding=1, stride=1, bias=False),
-                nn.BatchNorm2d(2*C2),
-                nn.ReLU())
+                nn.BatchNorm2d(2*C2), nn.ReLU())
             blks = blks + [
                 ('pool3', blk1),
                 ('convG', blk2),
@@ -170,16 +166,6 @@ class ScatNet(nn.Module):
             self.net = nn.Sequential(OrderedDict(blks))
             self.avg = nn.AvgPool2d(8)
             self.fc1 = nn.Linear(2*C2, self.num_classes)
-
-    def get_reg(self):
-        """ Define the default regularization scheme """
-        reg_loss = 0
-        for param in self.net.parameters():
-            if param.requires_grad:
-                reg_loss += self.wd * torch.sum(param**2)
-        for param in self.fc1.parameters():
-            reg_loss += self.wd_fc * torch.sum(param**2)
-        return reg_loss
 
     def forward(self, x):
         """ Define the default forward pass"""
@@ -232,7 +218,7 @@ class TrainNET(BaseClass):
                 seed=args.seed, **kwargs)
         elif args.dataset == 'tiny_imagenet':
             self.train_loader, self.test_loader = tiny_imagenet.get_data(
-                64, args.data_dir, val_only=args.testOnly,
+                64, args.datadir, val_only=args.testOnly,
                 batch_size=args.batch_size, trainsize=args.trainsize,
                 seed=args.seed, distributed=False, **kwargs)
 
@@ -273,11 +259,10 @@ class TrainNET(BaseClass):
         inv_params = []
         for name, module in model.net.named_children():
             params = [p for p in module.parameters() if p.requires_grad]
-            default_params += params
-            #  if name.startswith('inv'):
-                #  inv_params += params
-            #  else:
-                #  default_params += params
+            if name.startswith('inv'):
+                inv_params += params
+            else:
+                default_params += params
 
         self.optimizer, self.scheduler = optim.get_optim(
             'sgd', default_params, init_lr=lr,
@@ -285,10 +270,12 @@ class TrainNET(BaseClass):
             max_epochs=args.epochs)
 
         if len(inv_params) > 0:
+            # Get special optimizer parameters
             lr1 = config.get('lr1', lr)
             gamma1 = config.get('gamma1', 0.2)
             mom1 = config.get('mom1', mom)
             wd1 = config.get('wd1', wd)
+
             self.optimizer1, self.scheduler1 = optim.get_optim(
                 'sgd', inv_params, init_lr=lr1,
                 steps=args.steps, wd=wd1, gamma=gamma1, momentum=mom1,

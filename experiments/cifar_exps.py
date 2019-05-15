@@ -7,7 +7,6 @@ import argparse
 import os
 import torch
 import torch.nn as nn
-import torch.nn.init as init
 import time
 from scatnet_learn.layers import InvariantLayerj1, InvariantLayerj1_compress
 import torch.nn.functional as func
@@ -16,10 +15,8 @@ import random
 from collections import OrderedDict
 from scatnet_learn.data import cifar, tiny_imagenet
 from scatnet_learn import optim
-from math import sqrt
-from tune_trainer import BaseClass, get_hms
-
-from ray.tune import Trainable
+from tune_trainer import BaseClass, get_hms, net_init
+from tensorboardX import SummaryWriter
 
 # Training settings
 parser = argparse.ArgumentParser(description='PyTorch CIFAR Example')
@@ -44,70 +41,15 @@ parser.add_argument('--exist-ok', action='store_true',
                     help='If true, is ok if output directory already exists')
 parser.add_argument('--epochs', default=120, type=int, help='num epochs')
 parser.add_argument('--cpu', action='store_true', help='Do not run on gpus')
+parser.add_argument('--num-gpus', type=float, default=0.5)
 parser.add_argument('--no-scheduler', action='store_true')
 parser.add_argument('--type', default=None, type=str, nargs='+',
-                    help='''Model type(s) to build. If left blank, will run 14
-networks consisting of those defined by the dictionary "nets" (0, 1, or 2
-invariant layers at different depths). Can also specify to run "nets1" or
-"nets2", which swaps out the invariant layers for other iterations.
-Alternatively can directly specify the layer name, e.g. "invA", or "invB2".''')
+                    help='''Model type(s) to build.''')
 
 # Core hyperparameters
 parser.add_argument('--reg', default='l2', type=str, help='regularization term')
 parser.add_argument('--steps', default=[60,80,100], type=int, nargs='+')
 parser.add_argument('--gamma', default=0.2, type=float, help='Lr decay')
-
-
-def net_init(m, gain=1):
-    classname = m.__class__.__name__
-    if (classname.find('Conv') != -1) or (classname.find('Linear') != -1):
-        init.xavier_uniform_(m.weight, gain=np.sqrt(2))
-        try:
-            init.constant_(m.bias, 0)
-        # Can get an attribute error if no bias to learn
-        except AttributeError:
-            pass
-    elif classname.find('InvariantLayerj1_dct') != -1:
-        init.xavier_uniform_(m.A1, gain=gain)
-        init.xavier_uniform_(m.A2, gain=gain)
-        init.xavier_uniform_(m.A3, gain=gain)
-    elif classname.find('InvariantLayerj1') != -1:
-        init.xavier_uniform_(m.A, gain=gain)
-
-
-class MyModule(nn.Module):
-    """ This is a wrapper for our networks that has some useful functions"""
-    def __init__(self, dataset):
-        super().__init__()
-        # Define the number of scales and classes dependent on the dataset
-        if dataset == 'cifar10':
-            self.num_classes = 10
-            self.S = 3
-        elif dataset == 'cifar100':
-            self.num_classes = 100
-            self.S = 3
-        elif dataset == 'tiny_imagenet':
-            self.num_classes = 200
-            self.S = 4
-
-    def init(self, std=1):
-        """ Define the default initialization scheme """
-        self.apply(net_init)
-        # Try do any custom layer initializations
-        for child in self.net.modules():
-            try:
-                child.init(std)
-            except AttributeError:
-                pass
-
-    def forward(self, x):
-        """ Define the default forward pass"""
-        out = self.net(x)
-        out = self.avg(out)
-        out = out.view(out.size(0), -1)
-        out = self.fc1(out)
-
-        return func.log_softmax(out, dim=-1)
 
 
 # Define the options of networks. The 4 parameters are:
@@ -194,53 +136,63 @@ class MixedNet(MyModule):
     a normal network. You can change the ordering below to suit your
     task
     """
-    def __init__(self, dataset, type, biort='near_sym_a'):
-        super().__init__(dataset)
-        layers = allnets[type]
+    def __init__(self, dataset, type_, biort='near_sym_a'):
+        super().__init__()
+
+        # Define the number of scales and classes dependent on the dataset
+        if dataset == 'cifar10':
+            self.num_classes = 10
+            self.S = 3
+        elif dataset == 'cifar100':
+            self.num_classes = 100
+            self.S = 3
+        elif dataset == 'tiny_imagenet':
+            self.num_classes = 200
+            self.S = 4
+
+        # Build the selected net type by using the dictionary nets
+        layers = allnets[type_]
         blks = []
         layer = 0
         for blk, C1, C2, stride in layers:
+            letter = chr(ord('A') + layer)
             if blk == 'conv':
-                name = 'conv' + chr(ord('A') + layer)
+                name = 'conv' + letter
                 # Add a triple of layers for each convolutional layer
                 blk = nn.Sequential(
-                    nn.Conv2d(C1, C2, 3, padding=1, stride=stride),
-                    nn.BatchNorm2d(C2),
-                    nn.ReLU())
+                    nn.Conv2d(C1, C2, 3, padding=1, stride=stride, bias=False),
+                    nn.BatchNorm2d(C2), nn.ReLU())
                 layer += 1
             elif blk == 'pool':
                 name = 'pool' + str(C1)
                 blk = nn.MaxPool2d(2)
             elif blk == 'inv':
-                name = 'inv' + chr(ord('A') + layer)
+                name = 'inv' + letter
                 # Add a triple of layers for each invariant layer
                 blk = nn.Sequential(
                     InvariantLayerj1(C1, C2, stride, biort=biort),
-                    nn.BatchNorm2d(C2),
-                    nn.ReLU())
+                    nn.BatchNorm2d(C2), nn.ReLU())
                 layer += 1
             elif blk == 'inv_imp':
-                name = 'inv_imp' + chr(ord('A') + layer)
+                name = 'inv_imp' + letter
                 # Add a triple of layers for each invariant layer
                 blk = nn.Sequential(
                     InvariantLayerj1(
                         C1, C2, stride, alpha='impulse', biort=biort),
-                    nn.BatchNorm2d(C2),
-                    nn.ReLU())
+                    nn.BatchNorm2d(C2), nn.ReLU())
                 layer += 1
             elif blk == 'inv_3x3':
-                name = 'inv3x3' + chr(ord('A') + layer)
+                name = 'inv3x3' + letter
                 # Add a triple of layers for each invariant layer
                 blk = nn.Sequential(
                     InvariantLayerj1(
                         C1, C2, stride, k=3, biort=biort),
-                    nn.BatchNorm2d(C2),
-                    nn.ReLU())
+                    nn.BatchNorm2d(C2), nn.ReLU())
                 layer += 1
             # Add the name and block to the list
             blks.append((name, blk))
 
-        # C2 is the last output size from first 6 layers
+        # Build the common end point
         if dataset == 'cifar10' or dataset == 'cifar100':
             # Network is 3 stages of convolution
             self.net = nn.Sequential(OrderedDict(blks))
@@ -250,11 +202,11 @@ class MixedNet(MyModule):
             # Add 3 more layers to tiny imagenet
             blk1 = nn.MaxPool2d(2)
             blk2 = nn.Sequential(
-                nn.Conv2d(C2, 2*C2, 3, padding=1, stride=1),
+                nn.Conv2d(C2, 2*C2, 3, padding=1, stride=1, bias=False),
                 nn.BatchNorm2d(2*C2),
                 nn.ReLU())
             blk3 = nn.Sequential(
-                nn.Conv2d(2*C2, 2*C2, 3, padding=1, stride=1),
+                nn.Conv2d(2*C2, 2*C2, 3, padding=1, stride=1, bias=False),
                 nn.BatchNorm2d(2*C2),
                 nn.ReLU())
             blks = blks + [
@@ -264,6 +216,14 @@ class MixedNet(MyModule):
             self.net = nn.Sequential(OrderedDict(blks))
             self.avg = nn.AvgPool2d(8)
             self.fc1 = nn.Linear(2*C2, self.num_classes)
+
+    def forward(self, x):
+        """ Define the default forward pass"""
+        out = self.net(x)
+        out = self.avg(out)
+        out = out.view(out.size(0), -1)
+        out = self.fc1(out)
+        return func.log_softmax(out, dim=-1)
 
 
 class TrainNET(BaseClass):
@@ -308,7 +268,7 @@ class TrainNET(BaseClass):
                 seed=args.seed, **kwargs)
         elif args.dataset == 'tiny_imagenet':
             self.train_loader, self.test_loader = tiny_imagenet.get_data(
-                64, args.datadir, val_only=False,
+                64, args.datadir, val_only=args.testOnly,
                 batch_size=args.batch_size, trainsize=args.trainsize,
                 seed=args.seed, distributed=False, **kwargs)
 
@@ -340,25 +300,44 @@ class TrainNET(BaseClass):
         self.model = MixedNet(args.dataset, type_, biort=biort)
         init = lambda x: net_init(x, std)
         self.model.apply(init)
+
+        # Split across GPUs
+        if torch.cuda.device_count() > 1 and args.num_gpus > 1:
+            self.model = nn.DataParallel(self.model)
+            model = self.model.module
+        else:
+            model = self.model
         if self.use_cuda:
             self.model.cuda()
 
         # ######################################################################
         # Build the optimizer - use separate parameter groups for the invariant
         # and convolutional layers
-        default_params = {'params': list(self.model.fc1.parameters()),
-                          'lr': lr, 'mom': mom, 'wd': wd}
-        inv_params = {'params': [], 'lr': lr, 'mom': mom, 'wd': wd}
-        for name, module in self.model.net.named_children():
+        default_params = list(model.fc1.parameters())
+        inv_params = []
+        for name, module in model.net.named_children():
+            params = [p for p in module.parameters() if p.requires_grad]
             if name.startswith('inv'):
-                inv_params['params'] += list(module.parameters())
+                inv_params += params
             else:
-                default_params['params'] += list(module.parameters())
+                default_params += params
 
         self.optimizer, self.scheduler = optim.get_optim(
-            'sgd', [default_params, inv_params], init_lr=0.1,
-            steps=args.steps, wd=1e-4, gamma=args.gamma, momentum=0.9,
+            'sgd', default_params, init_lr=lr,
+            steps=args.steps, wd=wd, gamma=0.2, momentum=mom,
             max_epochs=args.epochs)
+
+        if len(inv_params) > 0:
+            # Get special optimizer parameters
+            lr1 = config.get('lr1', lr)
+            gamma1 = config.get('gamma1', 0.2)
+            mom1 = config.get('mom1', mom)
+            wd1 = config.get('wd1', wd)
+
+            self.optimizer1, self.scheduler1 = optim.get_optim(
+                'sgd', inv_params, init_lr=lr1,
+                steps=args.steps, wd=wd1, gamma=gamma1, momentum=mom1,
+                max_epochs=args.epochs)
 
         if self.verbose:
             print(self.model)
@@ -374,35 +353,60 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.no_scheduler:
+        # Create reporting objects
         args.verbose = True
         outdir = os.path.join(os.environ['HOME'], 'nonray_results', args.outdir)
+        tr_writer = SummaryWriter(os.path.join(outdir, 'train'))
+        val_writer = SummaryWriter(os.path.join(outdir, 'val'))
         if not os.path.exists(outdir):
             os.mkdir(outdir)
+        # Copy this source file to the output directory for record keeping
+        copyfile(__file__, os.path.join(outdir, 'search.py'))
+
+        # Choose the model to run and build it
         if args.type is None:
-            type_ = 'ref2'
+            type_ = 'ref'
         else:
             type_ = args.type[0]
         cfg = {'args': args, 'type': type_, 'biort': 'near_sym_a'}
         trn = TrainNET(cfg)
+        trn._final_epoch = args.epochs
+
+        # Train for set number of epochs
         elapsed_time = 0
-
         best_acc = 0
-        for epoch in range(120):
-            print('| Learning rate: {}'.format(trn.optimizer.param_groups[0]['lr']))
-            print('| Momentum : {}'.format(trn.optimizer.param_groups[0]['momentum']))
+        for epoch in range(trn.final_epoch):
+            print("\n| Training Epoch #{}".format(epoch))
+            print('| Learning rate: {}'.format(
+                trn.optimizer.param_groups[0]['lr']))
+            print('| Momentum : {}'.format(
+                trn.optimizer.param_groups[0]['momentum']))
             start_time = time.time()
-            trn._train()
-            results = trn._test()
-            acc1 = results['mean_accuracy']
-            if acc1 > best_acc:
-                print('| Saving Best model...\t\t\tTop1 = {:.2f}%'.format(acc1))
-                trn._save(outdir)
-            best_acc = acc1
+            # Update the scheduler
+            trn.step_lr()
 
-        epoch_time = time.time() - start_time
-        elapsed_time += epoch_time
-        print('| Elapsed time : %d:%02d:%02d\t Epoch time: %.1fs' % (
-              get_hms(elapsed_time) + (epoch_time,)))
+            # Train for one iteration and update
+            trn_results = trn._train_iteration()
+            tr_writer.add_scalar('loss', trn_results['mean_loss'], epoch)
+            tr_writer.add_scalar('acc', trn_results['mean_accuracy'], epoch)
+            tr_writer.add_scalar('acc5', trn_results['acc5'], epoch)
+
+            # Validate
+            val_results = trn._test()
+            val_writer.add_scalar('loss', val_results['mean_loss'], epoch)
+            val_writer.add_scalar('acc', val_results['mean_accuracy'], epoch)
+            val_writer.add_scalar('acc5', val_results['acc5'], epoch)
+            acc = val_results['mean_accuracy']
+            if acc > best_acc:
+                print('| Saving Best model...\t\t\tTop1 = {:.2f}%'.format(acc))
+                trn._save(outdir, 'model_best.pth')
+                best_acc = acc
+
+            trn._save(outdir, name='model_last.pth')
+            epoch_time = time.time() - start_time
+            elapsed_time += epoch_time
+            print('| Elapsed time : %d:%02d:%02d\t Epoch time: %.1fs' % (
+                  get_hms(elapsed_time) + (epoch_time,)))
 
     else:
 
@@ -410,8 +414,6 @@ if __name__ == "__main__":
         import ray
         from ray import tune
         from ray.tune.schedulers import AsyncHyperBandScheduler
-        from shutil import copyfile
-
         ray.init()
         exp_name = args.outdir
         outdir = os.path.join(os.environ['HOME'], 'ray_results', exp_name)
@@ -442,20 +444,17 @@ if __name__ == "__main__":
             type_ = list(nets.keys()) + ['ref2',]
 
         m, b = linear_func(0.1, 0.9, 0.7, 0.75)
-        if args.dataset.startswith('cifar'):
-            gpus = 0.5
-        else:
-            gpus = 1
         tune.run_experiments(
             {
                 exp_name: {
                     "stop": {
                         #  "mean_accuracy": 0.95,
-                        "training_iteration": 1 if args.smoke_test else args.epochs,
+                        "training_iteration": (1 if args.smoke_test
+                                               else args.epochs),
                     },
                     "resources_per_trial": {
                         "cpu": 1,
-                        "gpu": 0 if args.cpu else gpus
+                        "gpu": 0 if args.cpu else args.num_gpus
                     },
                     "run": TrainNET,
                     #  "num_samples": 1 if args.smoke_test else 40,

@@ -142,14 +142,6 @@ class BaseClass(Trainable):
             self.zero_grad()
             output = self.model(data)
             loss = func.nll_loss(output, target)
-            # Get the regularization loss directly from the network
-            #  try:
-                #  loss += self.model.get_reg()
-            #  except AttributeError:
-                #  try:
-                    #  loss += self.model.module.get_reg()
-                #  except AttributeError:
-                    #  pass
             loss.backward()
             self.opt_step()
             corrects, bs = num_correct(output.data, target, topk=(1,5))
