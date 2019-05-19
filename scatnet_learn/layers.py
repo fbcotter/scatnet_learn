@@ -84,14 +84,14 @@ class InvariantLayerj1(nn.Module):
 
     """
     def __init__(self, C, F=None, stride=2, k=1, alpha=None,
-                 biort='near_sym_a', mode='symmetric'):
+                 biort='near_sym_a', mode='symmetric', magbias=1e-2):
         super().__init__()
         if F is None:
             F = 7*C
         if k > 1 and alpha is not None:
             raise ValueError("Only use alpha when k=1")
 
-        self.scat = ScatLayerj1(biort=biort, mode=mode)
+        self.scat = ScatLayerj1(biort=biort, mode=mode, magbias=magbias)
         self.stride = stride
         # Create the learned mixing weights and possibly the expansion kernel
         self.A = nn.Parameter(torch.randn(F, 7*C, k, k))
@@ -131,10 +131,9 @@ class InvariantLayerj1(nn.Module):
                                  align_corners=False)
         return y
 
-    def __repr__(self):
-       return self._get_name() + \
-           '({}, {}, stride={}, k={}, alpha={}, biort={})'.format(
-               self.C, self.F, self.stride, self.k, self.alpha_t, self.biort)
+    def extra_repr(self):
+        return '{}, {}, stride={}, k={}, alpha={}'.format(
+               self.C, self.F, self.stride, self.k, self.alpha_t)
 
 
 class InvariantLayerj1_dct(nn.Module):
@@ -252,12 +251,14 @@ class ScatLayerj1(nn.Module):
             the first C channels are the lowpass outputs, and the next 6C are
             the magnitude highpass outputs.
     """
-    def __init__(self, biort='near_sym_a', mode='symmetric'):
+    def __init__(self, biort='near_sym_a', mode='symmetric', magbias=1e-2):
         super().__init__()
         self.biort = biort
         # Have to convert the string to an int as the grad checks don't work
         # with string inputs
+        self.mode_str = mode
         self.mode = mode_to_int(mode)
+        self.magbias = magbias
         if biort == 'near_sym_b_bp':
             self.bandpass_diag = True
             h0o, _, h1o, _, h2o, _ = _biort(biort)
@@ -272,9 +273,15 @@ class ScatLayerj1(nn.Module):
 
     def forward(self, x):
         if self.bandpass_diag:
-            Z = ScatLayerj1_rot_f.apply(x, self.h0o, self.h1o, self.h2o, self.mode)
+            Z = ScatLayerj1_rot_f.apply(
+                x, self.h0o, self.h1o, self.h2o, self.mode, self.magbias)
         else:
-            Z = ScatLayerj1_f.apply(x, self.h0o, self.h1o, self.mode)
+            Z = ScatLayerj1_f.apply(
+                x, self.h0o, self.h1o, self.mode, self.magbias)
         b, _, c, h, w = Z.shape
         Z = Z.view(b, 7*c, h, w)
         return Z
+
+    def extra_repr(self):
+        return "biort='{}', mode='{}', magbias={}".format(
+               self.biort, self.mode_str, self.magbias)

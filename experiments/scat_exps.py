@@ -133,13 +133,12 @@ class ScatNet(nn.Module):
             elif typ == 'scat':
                 name = 'scat' + letter
                 blk = nn.Sequential(
-                    ScatLayerj1(), nn.BatchNorm2d(7*C1), nn.ReLU())
+                    ScatLayerj1(magbias=b), nn.BatchNorm2d(7*C1), nn.ReLU())
                 layer += 1
             elif typ == 'inv':
                 name = 'inv' + letter
-                blk = nn.Sequential(InvariantLayerj1(C1, C2),
-                                    nn.BatchNorm2d(C2),
-                                    nn.ReLU())
+                blk = nn.Sequential(InvariantLayerj1(C1, C2, magbias=b),
+                                    nn.BatchNorm2d(C2), nn.ReLU())
                 layer += 1
             # Add the name and block to the list
             blks.append((name, blk))
@@ -236,10 +235,11 @@ class TrainNET(BaseClass):
         mom = config.get('mom', mom)
         wd = config.get('wd', wd)
         std = config.get('std', std)
+        bias = config.get('bias', 1e-2)
         #  drop_p = config.get('drop_p', drop_p)
 
         # Build the network
-        self.model = ScatNet(args.dataset, type_, wd)
+        self.model = ScatNet(args.dataset, type_, bias)
         init = lambda x: net_init(x, std)
         self.model.apply(init)
 
@@ -310,7 +310,7 @@ if __name__ == "__main__":
             type_ = 'ref'
         else:
             type_ = args.type[0]
-        cfg = {'args': args, 'type': type_}
+        cfg = {'args': args, 'type': type_, 'bias': 0}
         trn = TrainNET(cfg)
         trn._final_epoch = args.epochs
 
@@ -398,6 +398,7 @@ if __name__ == "__main__":
                     "config": {
                         "args": args,
                         "type": tune.grid_search(type_),
+                        "bias": tune.grid_search([0, 1e-1, 1e-2, 1e-3]),
                         #  "lr": tune.sample_from(
                         #      lambda spec: np.random.uniform(0.1, 0.7)),
                         #  "mom": tune.sample_from(

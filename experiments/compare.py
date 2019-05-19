@@ -82,11 +82,6 @@ nets = {
     'dtcwt': [('scat', 3, 'near_sym_a', 'symmetric'),
              ('conv', 3*7*7, 2*C, 1), ('conv', 2*C, 2*C, 1),
              ('conv', 2*C, 4*C, 1), ('conv', 4*C, 4*C, 1)],
-    'dtcwtZ': [('scat', 3, 'near_sym_a', 'zero'),
-             ('conv', 3*7*7, 2*C, 1), ('conv', 2*C, 2*C, 1),
-             ('conv', 2*C, 4*C, 1), ('conv', 4*C, 4*C, 1)],
-    #  'dtcwt_symm': [('scat', 'near_sym_a', None, None), ('scat', 'near_sym_b_bp', None, None),
-             #  ('conv', 3*7*7, 2*C, 1), ('conv', 2*C, 2*C, 1),
     'scat8': [('scat_fft', 3, 2, 8),
              ('conv', 3*9*9, 2*C, 1), ('conv', 2*C, 2*C, 1),
              ('conv', 2*C, 4*C, 1), ('conv', 4*C, 4*C, 1)],
@@ -96,12 +91,13 @@ nets = {
 }
 
 
-class ScatNet(MyModule):
+class ScatNet(nn.Module):
     """ MixedNet allows custom definition of conv/inv layers as you would
     a normal network. You can change the ordering below to suit your
     task
     """
-    def __init__(self, dataset, type_, biort='near_sym_a'):
+    def __init__(self, dataset, type_, biort='near_sym_a', mode='symmetric',
+                 magbias=1e-2):
         super().__init__()
 
         # Define the number of scales and classes dependent on the dataset
@@ -136,10 +132,10 @@ class ScatNet(MyModule):
                 blk = nn.MaxPool2d(2)
             elif typ == 'scat':
                 name = 'scatj1' + letter
-                biort = C2
-                mode = stride
-                blk = nn.Sequential(ScatLayerj1(biort, mode),
-                                    ScatLayerj1(biort, mode),
+                #  biort = C2
+                #  mode = stride
+                blk = nn.Sequential(ScatLayerj1(biort, mode, magbias),
+                                    ScatLayerj1(biort, mode, magbias),
                                     nn.BatchNorm2d(C1*7*7))
                 layer += 1
             elif typ == 'scat_fft':
@@ -206,6 +202,7 @@ class TrainNET(BaseClass):
         args = config.pop("args")
         vars(args).update(config)
         type_ = config.get('type')
+        dataset = config.get('dataset', args.dataset)
         if hasattr(args, 'verbose'):
             self._verbose = args.verbose
 
@@ -219,14 +216,14 @@ class TrainNET(BaseClass):
         # ######################################################################
         #  Data
         kwargs = {'num_workers': 0, 'pin_memory': True} if self.use_cuda else {}
-        if args.dataset.startswith('cifar'):
+        if dataset.startswith('cifar'):
             self.train_loader, self.test_loader = cifar.get_data(
-                32, args.datadir, dataset=args.dataset,
+                32, args.datadir, dataset=dataset,
                 batch_size=args.batch_size, trainsize=args.trainsize,
                 seed=args.seed, **kwargs)
-        elif args.dataset == 'tiny_imagenet':
+        elif dataset == 'tiny_imagenet':
             self.train_loader, self.test_loader = tiny_imagenet.get_data(
-                64, args.datadir, val_only=args.testOnly,
+                64, args.datadir, val_only=False,
                 batch_size=args.batch_size, trainsize=args.trainsize,
                 seed=args.seed, distributed=False, **kwargs)
 
@@ -247,9 +244,11 @@ class TrainNET(BaseClass):
         wd = config.get('wd', wd)
         std = config.get('std', std)
         biort = config.get('biort', 'near_sym_a')
+        mode = config.get('mode', 'symmetric')
+        magbias = config.get('magbias', 1e-2)
 
         # Build the network
-        self.model = MixedNet(args.dataset, type_, biort=biort)
+        self.model = ScatNet(dataset, type_, biort, mode, magbias)
         init = lambda x: net_init(x, std)
         self.model.apply(init)
 
@@ -410,6 +409,11 @@ if __name__ == "__main__":
                     "config": {
                         "args": args,
                         "type": tune.grid_search(type_),
+                        "dataset": tune.grid_search(['cifar10', 'cifar100']),
+                        #  "biort": tune.grid_search(['near_sym_a', 'near_sym_b',
+                                                   #  'near_sym_b_bp']),
+                        #  "mode": tune.grid_search(['zero', 'symmetric']),
+                        #  "magbias": tune.grid_search([0, 1e-3, 1e-2, 1e-1]),
                         #  "lr": tune.sample_from(lambda spec: np.random.uniform(
                             #  0.1, 0.7
                         #  )),

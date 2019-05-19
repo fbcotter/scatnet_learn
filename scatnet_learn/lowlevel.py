@@ -89,10 +89,8 @@ def c2q(w1, w2):
     # Get the shape of the tensor excluding the real/imagniary part
     b, ch, r, c = w1r.shape
 
-    y = torch.zeros((b, ch, r*2, c*2),
-                    requires_grad=w1r.requires_grad,
-                    device=w1r.device)
-
+    # Create new empty tensor and fill it
+    y = w1r.new_zeros((b, ch, r*2, c*2), requires_grad=w1r.requires_grad)
     y[:, :, ::2,::2] = x1
     y[:, :, ::2, 1::2] = x2
     y[:, :, 1::2, ::2] = x3
@@ -130,8 +128,8 @@ def symm_pad_1d(l, m):
 
 
 def colfilter(X, h, mode='symmetric'):
-    if X is None or X.shape == torch.Size([]):
-        return torch.zeros(1,1,1,1, device=X.device)
+    if X.shape == torch.Size([]):
+        return X.new_zeros((1,1,1,1))
     ch, r = X.shape[1:3]
     m = h.shape[2] // 2
     if mode == 'symmetric':
@@ -143,8 +141,8 @@ def colfilter(X, h, mode='symmetric'):
 
 
 def rowfilter(X, h, mode='symmetric'):
-    if X is None or X.shape == torch.Size([]):
-        return torch.zeros(1,1,1,1, device=X.device)
+    if X.shape == torch.Size([]):
+        return X.new_zeros((1,1,1,1))
     ch, _, c = X.shape[1:]
     m = h.shape[2] // 2
     h = h.transpose(2,3).contiguous()
@@ -228,13 +226,35 @@ def prep_filt(h, c, transpose=False):
     return torch.tensor(h, dtype=torch.get_default_dtype())
 
 
+class SmoothMagFn(torch.autograd.Function):
+    """ Class to do complex magnitude """
+    @staticmethod
+    def forward(ctx, x, y, b):
+        r = torch.sqrt(x**2 + y**2 + b**2)
+        if x.requires_grad:
+            dx = x/r
+            dy = y/r
+            ctx.save_for_backward(dx, dy)
+
+        return r - b
+
+    @staticmethod
+    def backward(ctx, dr):
+        dx = None
+        if ctx.needs_input_grad[0]:
+            drdx, drdy = ctx.saved_tensors
+            dx = drdx * dr
+            dy = drdy * dr
+        return dx, dy, None
+
+
 class ScatLayerj1_f(torch.autograd.Function):
     """ Function to do forward and backward passes of a single scattering
     layer with the DTCWT biorthogonal filters. """
 
     @staticmethod
-    def forward(ctx, x, h0o, h1o, mode):
-        bias = 1e-2
+    def forward(ctx, x, h0o, h1o, mode, bias):
+        #  bias = 1e-2
         #  bias = 0
         ctx.in_shape = x.shape
         batch, ch, r, c = x.shape
@@ -285,20 +305,18 @@ class ScatLayerj1_f(torch.autograd.Function):
                 [deg15i, deg45i, deg75i, deg105i, deg135i, deg165i], dim=1)
             del deg15i, deg45i, deg75i, deg105i, deg135i, deg165i
 
-            mags = torch.sqrt(reals**2 + imags**2 + bias**2)
+            r = torch.sqrt(reals**2 + imags**2 + bias**2)
             if x.requires_grad:
-                dx1 = reals/mags
-                dx2 = imags/mags
-                ctx.save_for_backward(h0o, h1o, dx1, dx2)
-                #  θ = torch.atan2(imags, reals)
-                #  ctx.save_for_backward(h0o, h1o, θ)
+                drdx = reals/r
+                drdy = imags/r
+                ctx.save_for_backward(h0o, h1o, drdx, drdy)
             else:
-                ctx.save_for_backward(h0o, h1o,
-                                      torch.tensor(0.), torch.tensor(0.))
+                ctx.save_for_backward(h0o, h1o, torch.tensor(0.),
+                                      torch.tensor(0.))
 
-            mags = mags - bias
+            r = r - bias
             del reals, imags
-            Z = torch.cat((LoLo[:, None], mags), dim=1)
+            Z = torch.cat((LoLo[:, None], r), dim=1)
 
         return Z
 
@@ -309,19 +327,19 @@ class ScatLayerj1_f(torch.autograd.Function):
 
         if ctx.needs_input_grad[0]:
             #  h0o, h1o, θ = ctx.saved_tensors
-            h0o, h1o, dxr, dxi = ctx.saved_tensors
+            h0o, h1o, drdx, drdy = ctx.saved_tensors
             # Use the special properties of the filters to get the time reverse
             h0o_t = h0o
             h1o_t = h1o
 
             # Level 1 backward (time reversed biorthogonal analysis filters)
-            dYl, dYm = dZ[:,0], dZ[:,1:]
+            dYl, dr = dZ[:,0], dZ[:,1:]
             ll = 1/4 * F.interpolate(dYl, scale_factor=2, mode="nearest")
-            reals = dYm * dxr
-            imags = dYm * dxi
+            reals = dr * drdx
+            imags = dr * drdy
             #  reals = dYm * torch.cos(θ)
             #  imags = dYm * torch.sin(θ)
-            del dYm
+            del dr
             lh = c2q((reals[:, 0], imags[:, 0]), (reals[:, 5], imags[:, 5]))
             hl = c2q((reals[:, 2], imags[:, 2]), (reals[:, 3], imags[:, 3]))
             hh = c2q((reals[:, 1], imags[:, 1]), (reals[:, 4], imags[:, 4]))
@@ -338,7 +356,7 @@ class ScatLayerj1_f(torch.autograd.Function):
             if ctx.extra_cols:
                 dX = dX[..., :-1]
 
-        return (dX,) + (None,) * 10
+        return (dX,) + (None,) * 4
 
 
 class ScatLayerj1_rot_f(torch.autograd.Function):
@@ -347,8 +365,7 @@ class ScatLayerj1_rot_f(torch.autograd.Function):
     filters, i.e. a slightly more expensive operation."""
 
     @staticmethod
-    def forward(ctx, x, h0o, h1o, h2o, mode):
-        bias = 1e-5
+    def forward(ctx, x, h0o, h1o, h2o, mode, bias):
         mode = int_to_mode(mode)
         ctx.mode = mode
         #  bias = 0
@@ -393,19 +410,17 @@ class ScatLayerj1_rot_f(torch.autograd.Function):
             [deg15i, deg45i, deg75i, deg105i, deg135i, deg165i], dim=1)
         del deg15i, deg45i, deg75i, deg105i, deg135i, deg165i
 
-        mags = torch.sqrt(reals**2 + imags**2 + bias**2)
+        r = torch.sqrt(reals**2 + imags**2 + bias**2)
         if x.requires_grad:
-            dx1 = reals/mags
-            dx2 = imags/mags
-            ctx.save_for_backward(h0o, h1o, h2o, dx1, dx2)
-            #  θ = torch.atan2(imags, reals)
-            #  ctx.save_for_backward(h0o, h1o, h2o, θ)
+            drdx = reals/r
+            drdy = imags/r
+            ctx.save_for_backward(h0o, h1o, h2o, drdx, drdy)
         else:
-            ctx.save_for_backward(h0o, h1o, h2o,
-                                  torch.tensor(0.), torch.tensor(0.))
-        mags = mags - bias
+            ctx.save_for_backward(h0o, h1o, h2o, torch.tensor(0.),
+                                  torch.tensor(0.))
+        r = r - bias
         del reals, imags
-        Z = torch.cat((LoLo[:, None], mags), dim=1)
+        Z = torch.cat((LoLo[:, None], r), dim=1)
 
         return Z
 
@@ -417,17 +432,17 @@ class ScatLayerj1_rot_f(torch.autograd.Function):
         if ctx.needs_input_grad[0]:
             # Don't need to do time reverse as these filters are symmetric
             #  h0o, h1o, h2o, θ = ctx.saved_tensors
-            h0o, h1o, h2o, dxr, dxi = ctx.saved_tensors
+            h0o, h1o, h2o, drdx, drdy = ctx.saved_tensors
 
             # Level 1 backward (time reversed biorthogonal analysis filters)
-            dYl, dYm = dZ[:,0], dZ[:,1:]
+            dYl, dr = dZ[:,0], dZ[:,1:]
             ll = 1/4 * F.interpolate(dYl, scale_factor=2, mode="nearest")
 
-            reals = dYm * dxr
-            imags = dYm * dxi
-            #  reals = dYm * torch.cos(θ)
-            #  imags = dYm * torch.sin(θ)
-            del dYm
+            reals = dr * drdx
+            imags = dr * drdy
+            #  reals = dr * torch.cos(θ)
+            #  imags = dr * torch.sin(θ)
+            del dr
             lh = c2q((reals[:, 0], imags[:, 0]), (reals[:, 5], imags[:, 5]))
             hl = c2q((reals[:, 2], imags[:, 2]), (reals[:, 3], imags[:, 3]))
             hh = c2q((reals[:, 1], imags[:, 1]), (reals[:, 4], imags[:, 4]))
@@ -446,4 +461,4 @@ class ScatLayerj1_rot_f(torch.autograd.Function):
             if ctx.extra_cols:
                 dX = dX[..., :-1]
 
-        return (dX,) + (None,) * 10
+        return (dX,) + (None,) * 5
