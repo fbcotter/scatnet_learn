@@ -2,3 +2,4 @@ torch
 torchvision
 scipy
 numpy
+-e git://github.com/fbcotter/pytorch_wavelets.git#egg=pytorch_wavelets
