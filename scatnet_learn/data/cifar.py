@@ -208,6 +208,10 @@ def get_data(in_size, data_dir, dataset='cifar10', batch_size=128,
         seed (int): random seed for the loaders
         perturb (bool): whether to do data augmentation on the training set
         double_size (bool): whether to double the input size
+
+    Returns:
+        trainloader: iterator with (data, target) for train set
+        valloader: iterator with (data, target) for val set
     """
     if double_size:
         resize = transforms.Resize(in_size*2)

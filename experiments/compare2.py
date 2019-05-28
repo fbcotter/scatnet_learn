@@ -8,7 +8,7 @@ import os
 import torch
 import torch.nn as nn
 import time
-from scatnet_learn.layers import ScatLayerj1
+from scatnet_learn.layers import ScatLayerj1, ScatLayerj2
 from kymatio import Scattering2D
 import torch.nn.functional as func
 import numpy as np
@@ -46,8 +46,6 @@ parser.add_argument('--num-gpus', type=float, default=0.5)
 parser.add_argument('--no-scheduler', action='store_true')
 parser.add_argument('--type', default=None, type=str, nargs='+',
                     help='''Model type(s) to build.''')
-parser.add_argument('--resume', action='store_true',
-                    help='resume from the last checkpoint in outdir')
 
 # Core hyperparameters
 parser.add_argument('--reg', default='l2', type=str, help='regularization term')
@@ -84,6 +82,9 @@ nets = {
     'dtcwt': [('scat', 3, 'near_sym_a', 'symmetric'),
              ('conv', 3*7*7, 2*C, 1), ('conv', 2*C, 2*C, 1),
              ('conv', 2*C, 4*C, 1), ('conv', 4*C, 4*C, 1)],
+    'dtcwt2': [('scatj2', 3, 'near_sym_a', 'symmetric'),
+               ('conv', 3*7*7, 2*C, 1), ('conv', 2*C, 2*C, 1),
+               ('conv', 2*C, 4*C, 1), ('conv', 4*C, 4*C, 1)],
     'scat8': [('scat_fft', 3, 2, 8),
              ('conv', 3*9*9, 2*C, 1), ('conv', 2*C, 2*C, 1),
              ('conv', 2*C, 4*C, 1), ('conv', 4*C, 4*C, 1)],
@@ -138,6 +139,11 @@ class ScatNet(nn.Module):
                 #  mode = stride
                 blk = nn.Sequential(ScatLayerj1(biort, mode, magbias),
                                     ScatLayerj1(biort, mode, magbias),
+                                    nn.BatchNorm2d(C1*7*7))
+                layer += 1
+            elif typ == 'scatj2':
+                name = 'scatj2' + letter
+                blk = nn.Sequential(ScatLayerj2(biort, 'qshift_a', mode, magbias),
                                     nn.BatchNorm2d(C1*7*7))
                 layer += 1
             elif typ == 'scat_fft':
@@ -217,17 +223,21 @@ class TrainNET(BaseClass):
 
         # ######################################################################
         #  Data
-        kwargs = {'num_workers': 4, 'pin_memory': True} if self.use_cuda else {}
+        kwargs = {'num_workers': 0, 'pin_memory': True} if self.use_cuda else {}
         if dataset.startswith('cifar'):
             self.train_loader, self.test_loader = cifar.get_data(
                 32, args.datadir, dataset=dataset,
                 batch_size=args.batch_size, trainsize=args.trainsize,
                 seed=args.seed, **kwargs)
+            epochs = 120
+            steps = [60, 80, 100]
         elif dataset == 'tiny_imagenet':
             self.train_loader, self.test_loader = tiny_imagenet.get_data(
                 64, args.datadir, val_only=False,
                 batch_size=args.batch_size, trainsize=args.trainsize,
                 seed=args.seed, distributed=False, **kwargs)
+            epochs = 45
+            steps = [18, 30, 40]
 
         # ######################################################################
         # Build the network based on the type parameter. θ are the optimal
@@ -277,8 +287,8 @@ class TrainNET(BaseClass):
 
         self.optimizer, self.scheduler = optim.get_optim(
             'sgd', default_params, init_lr=lr,
-            steps=args.steps, wd=wd, gamma=0.2, momentum=mom,
-            max_epochs=args.epochs)
+            steps=steps, wd=wd, gamma=0.2, momentum=mom,
+            max_epochs=epochs)
 
         if len(inv_params) > 0:
             # Get special optimizer parameters
@@ -289,8 +299,8 @@ class TrainNET(BaseClass):
 
             self.optimizer1, self.scheduler1 = optim.get_optim(
                 'sgd', inv_params, init_lr=lr1,
-                steps=args.steps, wd=wd1, gamma=gamma1, momentum=mom1,
-                max_epochs=args.epochs)
+                steps=steps, wd=wd1, gamma=gamma1, momentum=mom1,
+                max_epochs=epochs)
 
         if self.verbose:
             print(self.model)
@@ -315,7 +325,6 @@ if __name__ == "__main__":
             os.mkdir(outdir)
         # Copy this source file to the output directory for record keeping
         copyfile(__file__, os.path.join(outdir, 'search.py'))
-        copyfile('tune_trainer.py', os.path.join(outdir, 'tune_trainer.py'))
 
         # Choose the model to run and build it
         if args.type is None:
@@ -325,20 +334,19 @@ if __name__ == "__main__":
         cfg = {'args': args, 'type': type_}
         trn = TrainNET(cfg)
         trn._final_epoch = args.epochs
-        if args.resume:
-            trn._restore(os.path.join(outdir, 'model_last.pth'))
 
         # Train for set number of epochs
         elapsed_time = 0
         best_acc = 0
-        trn.step_lr()
-        for epoch in range(trn.last_epoch, trn.final_epoch):
+        for epoch in range(trn.final_epoch):
             print("\n| Training Epoch #{}".format(epoch))
             print('| Learning rate: {}'.format(
                 trn.optimizer.param_groups[0]['lr']))
             print('| Momentum : {}'.format(
                 trn.optimizer.param_groups[0]['momentum']))
             start_time = time.time()
+            # Update the scheduler
+            trn.step_lr()
 
             # Train for one iteration and update
             trn_results = trn._train_iteration()
@@ -362,8 +370,6 @@ if __name__ == "__main__":
             elapsed_time += epoch_time
             print('| Elapsed time : %d:%02d:%02d\t Epoch time: %.1fs' % (
                   get_hms(elapsed_time) + (epoch_time,)))
-            # Update the scheduler
-            trn.step_lr()
 
     # We are using a scheduler
     else:
@@ -379,7 +385,6 @@ if __name__ == "__main__":
             os.mkdir(outdir)
         # Copy this source file to the output directory for record keeping
         copyfile(__file__, os.path.join(outdir, 'search.py'))
-        copyfile('tune_trainer.py', os.path.join(outdir, 'tune_trainer.py'))
 
         sched = AsyncHyperBandScheduler(
             time_attr="training_iteration",
@@ -403,7 +408,7 @@ if __name__ == "__main__":
                     "stop": {
                         #  "mean_accuracy": 0.95,
                         "training_iteration": (1 if args.smoke_test
-                                               else args.epochs),
+                                               else 45),
                     },
                     "resources_per_trial": {
                         "cpu": 1,
@@ -415,12 +420,9 @@ if __name__ == "__main__":
                     "checkpoint_at_end": True,
                     "config": {
                         "args": args,
-                        "type": tune.grid_search(type_),
-                        "dataset": tune.grid_search(['cifar10', 'cifar100']),
-                        #  "biort": tune.grid_search(['near_sym_a', 'near_sym_b',
-                                                   #  'near_sym_b_bp']),
-                        #  "mode": tune.grid_search(['zero', 'symmetric']),
-                        #  "magbias": tune.grid_search([0, 1e-3, 1e-2, 1e-1]),
+                        "type": tune.grid_search(['dtcwt', 'dtcwt2', 'scat6', 'scat8']),
+                        "dataset": tune.grid_search(['tiny_imagenet']),
+                        #, 'tiny_imagenet']),
                         #  "lr": tune.sample_from(lambda spec: np.random.uniform(
                             #  0.1, 0.7
                         #  )),

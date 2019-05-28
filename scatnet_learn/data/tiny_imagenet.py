@@ -21,7 +21,7 @@ def subsample(data_dir, sz):
 
 def get_data(in_size, data_dir, val_only=False, batch_size=128,
              trainsize=-1, seed=random.randint(0, 10000), perturb=True,
-             num_workers=0, iter_size=1, distributed=False, pin_memory=False):
+             num_workers=4, iter_size=1, distributed=False, pin_memory=False):
     """ Provides a pytorch loader to load in imagenet
     Args:
         in_size (int): the input size - can be used to scale the spatial size

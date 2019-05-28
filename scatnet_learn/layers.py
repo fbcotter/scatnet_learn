@@ -97,7 +97,7 @@ class InvariantLayerj1(nn.Module):
         self.stride = stride
         # Create the learned mixing weights and possibly the expansion kernel
         self.A = nn.Parameter(torch.randn(F, 7*C, k, k))
-        init.xavier_uniform_(self.A)
+        init.xavier_uniform_(self.A, gain=1.5)
         self.b = nn.Parameter(torch.zeros(F,))
         self.C = C
         self.F = F

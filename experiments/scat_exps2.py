@@ -8,10 +8,10 @@ import os
 import torch
 import torch.nn as nn
 import time
-from scatnet_learn.layers import ScatLayerj1
-from kymatio import Scattering2D
+from scatnet_learn.layers import InvariantLayerj1, ScatLayerj1
 import torch.nn.functional as func
 import numpy as np
+from math import ceil
 import random
 from collections import OrderedDict
 from scatnet_learn.data import cifar, tiny_imagenet
@@ -46,28 +46,11 @@ parser.add_argument('--num-gpus', type=float, default=0.5)
 parser.add_argument('--no-scheduler', action='store_true')
 parser.add_argument('--type', default=None, type=str, nargs='+',
                     help='''Model type(s) to build.''')
-parser.add_argument('--resume', action='store_true',
-                    help='resume from the last checkpoint in outdir')
 
 # Core hyperparameters
 parser.add_argument('--reg', default='l2', type=str, help='regularization term')
 parser.add_argument('--steps', default=[60,80,100], type=int, nargs='+')
 parser.add_argument('--gamma', default=0.2, type=float, help='Lr decay')
-
-
-class ScatFFT(nn.Module):
-    """ Wrap the kymatio scat layer in an nn.module"""
-    def __init__(self, J, shape, L):
-        super().__init__()
-        self.xfm = Scattering2D(J, shape, L)
-
-    def forward(self, x):
-        x = self.xfm(x)
-        s = x.shape
-        return x.view(s[0], s[1]*s[2], s[3], s[4])
-
-    def _apply(self, fn):
-        self.xfm.cuda()
 
 
 # Define the options of networks. The 4 parameters are:
@@ -80,72 +63,83 @@ class ScatFFT(nn.Module):
 # The dicionary 'nets3' is the same as 'nets' except we change the invariant
 # layer for an invariant layer with a 3x3 convolution
 C = 96
-nets = {
-    'dtcwt': [('scat', 3, 'near_sym_a', 'symmetric'),
-             ('conv', 3*7*7, 2*C, 1), ('conv', 2*C, 2*C, 1),
-             ('conv', 2*C, 4*C, 1), ('conv', 4*C, 4*C, 1)],
-    'scat8': [('scat_fft', 3, 2, 8),
-             ('conv', 3*9*9, 2*C, 1), ('conv', 2*C, 2*C, 1),
-             ('conv', 2*C, 4*C, 1), ('conv', 4*C, 4*C, 1)],
-    'scat6': [('scat_fft', 3, 2, 6),
-             ('conv', 3*7*7, 2*C, 1), ('conv', 2*C, 2*C, 1),
-             ('conv', 2*C, 4*C, 1), ('conv', 4*C, 4*C, 1)],
-}
+p = 0.3
+nets = {'ref': [('conv', 3, 21, 0), ('pool', 1, None, None),
+                ('conv', 21, 147, 0), ('pool', 2, None, None),
+                ('conv', 147, 2*C, p), ('conv', 2*C, 2*C, p),
+                ('conv', 2*C, 4*C, p), ('conv', 4*C, 4*C, p)],
+        'scatA':[('scat', 3, None, None), ('scat', 21, None, None),
+                 ('conv', 147, 2*C, p), ('conv', 2*C, 2*C, p),
+                 ('conv', 2*C, 4*C, p), ('conv', 4*C, 4*C, p)],
+        'scatB':[('inv', 3, 21, 2), ('inv', 21, 147, 2),
+                 ('conv', 147, 2*C, p), ('conv', 2*C, 4*C, p),
+                 ('conv', 4*C, 4*C, p), ('conv', 4*C, 4*C, p)],
+        'scatC':[('conv', 3, 16, 0),
+                 ('scat', 16, None, None), ('scat', 16*7, None, None),
+                 ('conv', 16*49, 2*C, p), ('conv', 2*C, 2*C, p),
+                 ('conv', 2*C, 4*C, p), ('conv', 4*C, 4*C, p)],
+        'scatD':[('conv', 3, 16, 0),
+                 ('inv', 16, 16*7, 2), ('inv', 16*7, 16*49, 2),
+                 ('conv', 16*49, 2*C, p), ('conv', 2*C, 4*C, p),
+                 ('conv', 4*C, 4*C, p), ('conv', 4*C, 4*C, p)],
+        'scatD1':[('conv', 3, 16, 0),
+                  ('inv', 16, 50, 2), ('inv', 50, 147, 2),
+                  ('conv', 147, 2*C, p), ('conv', 2*C, 4*C, p),
+                  ('conv', 4*C, 4*C, p), ('conv', 4*C, 4*C, p)],
+        'scatD2':[('conv', 3, 16, 0),
+                  ('inv', 16, 112, 2), ('inv', 112, 147, 2),
+                  ('conv', 147, 2*C, p), ('conv', 2*C, 2*C, p),
+                  ('conv', 2*C, 4*C, p), ('conv', 4*C, 4*C, p)],}
 
 
 class ScatNet(nn.Module):
-    """ MixedNet allows custom definition of conv/inv layers as you would
-    a normal network. You can change the ordering below to suit your
-    task
+    """ ScatNet is like a MixedNet but with a scattering front end (perhaps
+    with learning between the layers)
     """
-    def __init__(self, dataset, type_, biort='near_sym_a', mode='symmetric',
-                 magbias=1e-2):
+    def __init__(self, dataset, type_, b=1e-2):
         super().__init__()
 
         # Define the number of scales and classes dependent on the dataset
         if dataset == 'cifar10':
             self.num_classes = 10
             self.S = 3
-            shape = (32, 32)
         elif dataset == 'cifar100':
             self.num_classes = 100
             self.S = 3
-            shape = (32, 32)
         elif dataset == 'tiny_imagenet':
             self.num_classes = 200
             self.S = 4
-            shape = (64, 64)
 
         # Build the selected net type by using the dictionary nets
         layers = nets[type_]
         blks = []
         layer = 0
-        for typ, C1, C2, stride in layers:
+        for typ, C1, C2, drop_p in layers:
             letter = chr(ord('A') + layer)
             if typ == 'conv':
                 name = 'conv' + letter
                 # Add a triple of layers for each convolutional layer
-                blk = nn.Sequential(
-                    nn.Conv2d(C1, C2, 3, padding=1, stride=stride, bias=False),
-                    nn.BatchNorm2d(C2), nn.ReLU())
+                if drop_p > 0:
+                    blk = nn.Sequential(
+                        nn.Conv2d(C1, C2, 3, padding=1, stride=1, bias=False),
+                        nn.BatchNorm2d(C2), nn.Dropout(p=drop_p), nn.ReLU())
+                else:
+                    blk = nn.Sequential(
+                        nn.Conv2d(C1, C2, 3, padding=1, stride=1, bias=False),
+                        nn.BatchNorm2d(C2), nn.ReLU())
                 layer += 1
             elif typ == 'pool':
                 name = 'pool' + str(C1)
                 blk = nn.MaxPool2d(2)
             elif typ == 'scat':
-                name = 'scatj1' + letter
-                #  biort = C2
-                #  mode = stride
-                blk = nn.Sequential(ScatLayerj1(biort, mode, magbias),
-                                    ScatLayerj1(biort, mode, magbias),
-                                    nn.BatchNorm2d(C1*7*7))
+                name = 'scat' + letter
+                blk = nn.Sequential(
+                    ScatLayerj1(magbias=b), nn.BatchNorm2d(7*C1), nn.ReLU())
                 layer += 1
-            elif typ == 'scat_fft':
-                J = C2
-                L = stride
-                name = 'scat_fft' + letter
-                blk = nn.Sequential(ScatFFT(J=J, L=L, shape=shape),
-                                    nn.BatchNorm2d(C1*(L+1)**2))
+            elif typ == 'inv':
+                name = 'inv' + letter
+                blk = nn.Sequential(InvariantLayerj1(C1, C2, magbias=b),
+                                    nn.BatchNorm2d(C2), nn.ReLU())
                 layer += 1
             # Add the name and block to the list
             blks.append((name, blk))
@@ -158,17 +152,16 @@ class ScatNet(nn.Module):
             self.fc1 = nn.Linear(C2, self.num_classes)
         elif dataset == 'tiny_imagenet':
             # Add 3 more layers to tiny imagenet
-            blk1 = nn.MaxPool2d(2)
             blk2 = nn.Sequential(
-                nn.Conv2d(C2, 2*C2, 3, padding=1, stride=1, bias=False),
-                nn.BatchNorm2d(2*C2), nn.ReLU())
+                nn.Conv2d(C2, 2*C2, 3, padding=1, stride=2, bias=False),
+                nn.BatchNorm2d(2*C2), nn.Dropout(drop_p), nn.ReLU())
             blk3 = nn.Sequential(
                 nn.Conv2d(2*C2, 2*C2, 3, padding=1, stride=1, bias=False),
-                nn.BatchNorm2d(2*C2), nn.ReLU())
+                nn.BatchNorm2d(2*C2), nn.Dropout(drop_p), nn.ReLU())
             blks = blks + [
-                ('pool3', blk1),
-                ('convG', blk2),
-                ('convH', blk3)]
+                #  ('pool3', blk1),
+                ('convH', blk2),
+                ('convI', blk3)]
             self.net = nn.Sequential(OrderedDict(blks))
             self.avg = nn.AvgPool2d(8)
             self.fc1 = nn.Linear(2*C2, self.num_classes)
@@ -217,7 +210,7 @@ class TrainNET(BaseClass):
 
         # ######################################################################
         #  Data
-        kwargs = {'num_workers': 4, 'pin_memory': True} if self.use_cuda else {}
+        kwargs = {'num_workers': 0, 'pin_memory': True} if self.use_cuda else {}
         if dataset.startswith('cifar'):
             self.train_loader, self.test_loader = cifar.get_data(
                 32, args.datadir, dataset=dataset,
@@ -232,12 +225,10 @@ class TrainNET(BaseClass):
         # ######################################################################
         # Build the network based on the type parameter. θ are the optimal
         # hyperparameters found by cross validation.
-        if type_.startswith('dtcwt'):
-            θ = (0.5, 0.8, 1e-4, 1)
-        elif type_.startswith('scat'):
-            θ = (0.5, 0.8, 1e-4, 1)
+        if type_ == 'ref':
+            θ = (0.1, 0.9, 1e-4, 1)
         else:
-            θ = (0.5, 0.85, 1e-4, 1)
+            θ = (0.2, 0.9, 5e-5, 1.5)
             #  raise ValueError('Unknown type')
         lr, mom, wd, std = θ
         # If the parameters were provided as an option, use them
@@ -245,12 +236,11 @@ class TrainNET(BaseClass):
         mom = config.get('mom', mom)
         wd = config.get('wd', wd)
         std = config.get('std', std)
-        biort = config.get('biort', 'near_sym_a')
-        mode = config.get('mode', 'symmetric')
-        magbias = config.get('magbias', 1e-2)
+        bias = config.get('bias', 1e-2)
+        #  drop_p = config.get('drop_p', drop_p)
 
         # Build the network
-        self.model = ScatNet(dataset, type_, biort, mode, magbias)
+        self.model = ScatNet(args.dataset, type_, bias)
         init = lambda x: net_init(x, std)
         self.model.apply(init)
 
@@ -264,7 +254,7 @@ class TrainNET(BaseClass):
             self.model.cuda()
 
         # ######################################################################
-        # Build the optimizer - use separate parameter groups for the gain
+        # Build the optimizer - use separate parameter groups for the invariant
         # and convolutional layers
         default_params = list(model.fc1.parameters())
         inv_params = []
@@ -306,6 +296,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.no_scheduler:
+        if not args.cpu:
+            import py3nvml
+            py3nvml.grab_gpus(ceil(args.num_gpus))
         # Create reporting objects
         args.verbose = True
         outdir = os.path.join(os.environ['HOME'], 'nonray_results', args.outdir)
@@ -319,26 +312,25 @@ if __name__ == "__main__":
 
         # Choose the model to run and build it
         if args.type is None:
-            type_ = 'dtcwt'
+            type_ = 'ref'
         else:
             type_ = args.type[0]
-        cfg = {'args': args, 'type': type_}
+        cfg = {'args': args, 'type': type_, 'bias': 1e-2}
         trn = TrainNET(cfg)
         trn._final_epoch = args.epochs
-        if args.resume:
-            trn._restore(os.path.join(outdir, 'model_last.pth'))
 
         # Train for set number of epochs
         elapsed_time = 0
         best_acc = 0
-        trn.step_lr()
-        for epoch in range(trn.last_epoch, trn.final_epoch):
+        for epoch in range(trn.final_epoch):
             print("\n| Training Epoch #{}".format(epoch))
             print('| Learning rate: {}'.format(
                 trn.optimizer.param_groups[0]['lr']))
             print('| Momentum : {}'.format(
                 trn.optimizer.param_groups[0]['momentum']))
             start_time = time.time()
+            # Update the scheduler
+            trn.step_lr()
 
             # Train for one iteration and update
             trn_results = trn._train_iteration()
@@ -362,10 +354,9 @@ if __name__ == "__main__":
             elapsed_time += epoch_time
             print('| Elapsed time : %d:%02d:%02d\t Epoch time: %.1fs' % (
                   get_hms(elapsed_time) + (epoch_time,)))
-            # Update the scheduler
-            trn.step_lr()
 
     # We are using a scheduler
+
     else:
 
         args.verbose = False
@@ -388,13 +379,10 @@ if __name__ == "__main__":
             grace_period=120)
 
         # Select which networks to run
-        if args.type is not None:
-            if len(args.type) == 1 and args.type[0] == 'nets':
-                type_ = list(nets.keys())
-            else:
-                type_ = args.type
-        else:
+        if args.type is None:
             type_ = list(nets.keys())
+        else:
+            type_ = args.type
 
         m, b = linear_func(0.1, 0.9, 0.7, 0.75)
         tune.run_experiments(
@@ -416,23 +404,17 @@ if __name__ == "__main__":
                     "config": {
                         "args": args,
                         "type": tune.grid_search(type_),
-                        "dataset": tune.grid_search(['cifar10', 'cifar100']),
-                        #  "biort": tune.grid_search(['near_sym_a', 'near_sym_b',
-                                                   #  'near_sym_b_bp']),
-                        #  "mode": tune.grid_search(['zero', 'symmetric']),
-                        #  "magbias": tune.grid_search([0, 1e-3, 1e-2, 1e-1]),
-                        #  "lr": tune.sample_from(lambda spec: np.random.uniform(
-                            #  0.1, 0.7
-                        #  )),
+                        #  "bias": tune.grid_search([0, 1e-1, 1e-2, 1e-3]),
+                        #  "lr": tune.sample_from(
+                        #      lambda spec: np.random.uniform(0.1, 0.7)),
                         #  "mom": tune.sample_from(
-                            #  lambda spec: m*spec.config.lr + b +
-                                #  0.05*np.random.randn()),
-                        #  "wd": tune.sample_from(lambda spec: np.random.uniform(
-                           #  1e-5, 5e-4
-                        #  ))
-                        #  "lr": tune.grid_search([0.01, 0.0316, 0.1, 0.316, 1]),
+                        #      lambda spec: m * spec.config.lr + b + \
+                        #      0.05*np.random.randn()),
+                        #  "wd": tune.sample_from(
+                        #      lambda spec: np.random.uniform(1e-5, 5e-4)),
+                        #  "lr": tune.grid_search([0.0316, 0.1, 0.316, 1]),
                         #  "momentum": tune.grid_search([0.7, 0.8, 0.9]),
-                        #  "wd": tune.grid_search([1e-5, 1e-1e-4]),
+                        #  "wd": tune.grid_search([1e-5, 1e-4]),
                         #  "std": tune.grid_search([0.5, 1., 1.5, 2.0])
                     }
                 }
