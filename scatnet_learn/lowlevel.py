@@ -73,7 +73,7 @@ class ScatLayerj1_f(torch.autograd.Function):
     layer with the DTCWT biorthogonal filters. """
 
     @staticmethod
-    def forward(ctx, x, h0o, h1o, mode, bias):
+    def forward(ctx, x, h0o, h1o, mode, bias, combine_colour):
         #  bias = 1e-2
         #  bias = 0
         ctx.in_shape = x.shape
@@ -81,10 +81,18 @@ class ScatLayerj1_f(torch.autograd.Function):
         assert r % 2 == c % 2 == 0
         mode = int_to_mode(mode)
         ctx.mode = mode
+        ctx.combine_colour = combine_colour
 
         ll, reals, imags = fwd_j1(x, h0o, h1o, False, 1, mode)
         ll = F.avg_pool2d(ll, 2)
-        r = torch.sqrt(reals**2 + imags**2 + bias**2)
+        if combine_colour:
+            r = torch.sqrt(reals[:,:,0]**2 + imags[:,:,0]**2 +
+                           reals[:,:,1]**2 + imags[:,:,1]**2 +
+                           reals[:,:,2]**2 + imags[:,:,2]**2 + bias**2)
+            r = r[:, :, None]
+        else:
+            r = torch.sqrt(reals**2 + imags**2 + bias**2)
+
         if x.requires_grad:
             drdx = reals/r
             drdy = imags/r
@@ -95,7 +103,10 @@ class ScatLayerj1_f(torch.autograd.Function):
 
         r = r - bias
         del reals, imags
-        Z = torch.cat((ll[:, None], r), dim=1)
+        if combine_colour:
+            Z = torch.cat((ll, r[:, :, 0]), dim=1)
+        else:
+            Z = torch.cat((ll[:, None], r), dim=1)
 
         return Z
 
@@ -112,14 +123,18 @@ class ScatLayerj1_f(torch.autograd.Function):
             h1o_t = h1o
 
             # Level 1 backward (time reversed biorthogonal analysis filters)
-            dYl, dr = dZ[:,0], dZ[:,1:]
+            if ctx.combine_colour:
+                dYl, dr = dZ[:,:3], dZ[:,3:]
+                dr = dr[:, :, None]
+            else:
+                dYl, dr = dZ[:,0], dZ[:,1:]
             ll = 1/4 * F.interpolate(dYl, scale_factor=2, mode="nearest")
             reals = dr * drdx
             imags = dr * drdy
 
             dX = inv_j1(ll, reals, imags, h0o_t, h1o_t, 1, 3, 4, mode)
 
-        return (dX,) + (None,) * 4
+        return (dX,) + (None,) * 5
 
 
 class ScatLayerj1_rot_f(torch.autograd.Function):
@@ -128,18 +143,25 @@ class ScatLayerj1_rot_f(torch.autograd.Function):
     filters, i.e. a slightly more expensive operation."""
 
     @staticmethod
-    def forward(ctx, x, h0o, h1o, h2o, mode, bias):
+    def forward(ctx, x, h0o, h1o, h2o, mode, bias, combine_colour):
         mode = int_to_mode(mode)
         ctx.mode = mode
         #  bias = 0
         ctx.in_shape = x.shape
+        ctx.combine_colour = combine_colour
         batch, ch, r, c = x.shape
         assert r % 2 == c % 2 == 0
 
         # Level 1 forward (biorthogonal analysis filters)
         ll, reals, imags = fwd_j1_rot(x, h0o, h1o, h2o, False, 1, mode)
         ll = F.avg_pool2d(ll, 2)
-        r = torch.sqrt(reals**2 + imags**2 + bias**2)
+        if combine_colour:
+            r = torch.sqrt(reals[:,:,0]**2 + imags[:,:,0]**2 +
+                           reals[:,:,1]**2 + imags[:,:,1]**2 +
+                           reals[:,:,2]**2 + imags[:,:,2]**2 + bias**2)
+            r = r[:, :, None]
+        else:
+            r = torch.sqrt(reals**2 + imags**2 + bias**2)
         if x.requires_grad:
             drdx = reals/r
             drdy = imags/r
@@ -149,7 +171,10 @@ class ScatLayerj1_rot_f(torch.autograd.Function):
             ctx.save_for_backward(h0o, h1o, h2o, z, z)
         r = r - bias
         del reals, imags
-        Z = torch.cat((ll[:, None], r), dim=1)
+        if combine_colour:
+            Z = torch.cat((ll, r[:, :, 0]), dim=1)
+        else:
+            Z = torch.cat((ll[:, None], r), dim=1)
 
         return Z
 
@@ -164,14 +189,18 @@ class ScatLayerj1_rot_f(torch.autograd.Function):
             h0o, h1o, h2o, drdx, drdy = ctx.saved_tensors
 
             # Level 1 backward (time reversed biorthogonal analysis filters)
-            dYl, dr = dZ[:,0], dZ[:,1:]
+            if ctx.combine_colour:
+                dYl, dr = dZ[:,:3], dZ[:,3:]
+                dr = dr[:, :, None]
+            else:
+                dYl, dr = dZ[:,0], dZ[:,1:]
             ll = 1/4 * F.interpolate(dYl, scale_factor=2, mode="nearest")
 
             reals = dr * drdx
             imags = dr * drdy
             dX = inv_j1_rot(ll, reals, imags, h0o, h1o, h2o, 1, 3, 4, mode)
 
-        return (dX,) + (None,) * 5
+        return (dX,) + (None,) * 6
 
 
 class ScatLayerj2_f(torch.autograd.Function):
@@ -179,7 +208,7 @@ class ScatLayerj2_f(torch.autograd.Function):
     layer with the DTCWT biorthogonal filters. """
 
     @staticmethod
-    def forward(ctx, x, h0o, h1o, h0a, h0b, h1a, h1b, mode, bias):
+    def forward(ctx, x, h0o, h1o, h0a, h0b, h1a, h1b, mode, bias, combine_colour):
         #  bias = 1e-2
         #  bias = 0
         ctx.in_shape = x.shape
@@ -187,48 +216,95 @@ class ScatLayerj2_f(torch.autograd.Function):
         assert r % 8 == c % 8 == 0
         mode = int_to_mode(mode)
         ctx.mode = mode
+        ctx.combine_colour = combine_colour
 
         # First order scattering
         s0, reals, imags = fwd_j1(x, h0o, h1o, False, 1, mode)
-        s1_j1 = torch.sqrt(reals**2 + imags**2 + bias**2)
-        if x.requires_grad:
-            dsdx1 = reals/s1_j1
-            dsdy1 = imags/s1_j1
-        s1_j1 = s1_j1 - bias
+        if combine_colour:
+            s1_j1 = torch.sqrt(reals[:,:,0]**2 + imags[:,:,0]**2 +
+                               reals[:,:,1]**2 + imags[:,:,1]**2 +
+                               reals[:,:,2]**2 + imags[:,:,2]**2 + bias**2)
+            s1_j1 = s1_j1[:, :, None]
+            if x.requires_grad:
+                dsdx1 = reals/s1_j1
+                dsdy1 = imags/s1_j1
+            s1_j1 = s1_j1 - bias
 
-        s0, reals, imags = fwd_j2plus(s0, h0a, h1a, h0b, h1b, False, 1, mode)
-        s1_j2 = torch.sqrt(reals**2 + imags**2 + bias**2)
-        if x.requires_grad:
-            dsdx2 = reals/s1_j2
-            dsdy2 = imags/s1_j2
-        s1_j2 = s1_j2 - bias
-        s0 = F.avg_pool2d(s0, 2)
+            s0, reals, imags = fwd_j2plus(s0, h0a, h1a, h0b, h1b, False, 1, mode)
+            s1_j2 = torch.sqrt(reals[:,:,0]**2 + imags[:,:,0]**2 +
+                               reals[:,:,1]**2 + imags[:,:,1]**2 +
+                               reals[:,:,2]**2 + imags[:,:,2]**2 + bias**2)
+            s1_j2 = s1_j2[:, :, None]
+            if x.requires_grad:
+                dsdx2 = reals/s1_j2
+                dsdy2 = imags/s1_j2
+            s1_j2 = s1_j2 - bias
+            s0 = F.avg_pool2d(s0, 2)
 
-        # Second order scattering
-        p = s1_j1.shape
-        s1_j1 = s1_j1.view(p[0], 6*p[2], p[3], p[4])
-        s1_j1, reals, imags = fwd_j1(s1_j1, h0o, h1o, False, 1, mode)
-        s2_j1 = torch.sqrt(reals**2 + imags**2 + bias**2)
-        if x.requires_grad:
-            dsdx2_1 = reals/s2_j1
-            dsdy2_1 = imags/s2_j1
-        q = s2_j1.shape
-        s2_j1 = s2_j1.view(q[0], 36, q[2]//6, q[3], q[4])
-        s2_j1 = s2_j1 - bias
-        s1_j1 = F.avg_pool2d(s1_j1, 2)
-        s1_j1 = s1_j1.view(p[0], 6, p[2], p[3]//2, p[4]//2)
+            # Second order scattering
+            s1_j1 = s1_j1[:, :, 0]
+            s1_j1, reals, imags = fwd_j1(s1_j1, h0o, h1o, False, 1, mode)
+            s2_j1 = torch.sqrt(reals**2 + imags**2 + bias**2)
+            if x.requires_grad:
+                dsdx2_1 = reals/s2_j1
+                dsdy2_1 = imags/s2_j1
+            q = s2_j1.shape
+            s2_j1 = s2_j1.view(q[0], 36, q[3], q[4])
+            s2_j1 = s2_j1 - bias
+            s1_j1 = F.avg_pool2d(s1_j1, 2)
+            if x.requires_grad:
+                ctx.save_for_backward(h0o, h1o, h0a, h0b, h1a, h1b,
+                                      dsdx1, dsdy1, dsdx2, dsdy2,
+                                      dsdx2_1, dsdy2_1)
+            else:
+                z = x.new_zeros(1)
+                ctx.save_for_backward(h0o, h1o, h0a, h0b, h1a, h1b,
+                                      z, z, z, z, z, z)
 
-        if x.requires_grad:
-            ctx.save_for_backward(h0o, h1o, h0a, h0b, h1a, h1b,
-                                  dsdx1, dsdy1, dsdx2, dsdy2,
-                                  dsdx2_1, dsdy2_1)
+            del reals, imags
+            Z = torch.cat((s0, s1_j1, s1_j2[:,:,0], s2_j1), dim=1)
+
         else:
-            z = x.new_zeros(1)
-            ctx.save_for_backward(h0o, h1o, h0a, h0b, h1a, h1b,
-                                  z, z, z, z, z, z)
+            s1_j1 = torch.sqrt(reals**2 + imags**2 + bias**2)
+            if x.requires_grad:
+                dsdx1 = reals/s1_j1
+                dsdy1 = imags/s1_j1
+            s1_j1 = s1_j1 - bias
 
-        del reals, imags
-        Z = torch.cat((s0[:, None], s1_j1, s1_j2, s2_j1), dim=1)
+            s0, reals, imags = fwd_j2plus(s0, h0a, h1a, h0b, h1b, False, 1, mode)
+            s1_j2 = torch.sqrt(reals**2 + imags**2 + bias**2)
+            if x.requires_grad:
+                dsdx2 = reals/s1_j2
+                dsdy2 = imags/s1_j2
+            s1_j2 = s1_j2 - bias
+            s0 = F.avg_pool2d(s0, 2)
+
+            # Second order scattering
+            p = s1_j1.shape
+            s1_j1 = s1_j1.view(p[0], 6*p[2], p[3], p[4])
+
+            s1_j1, reals, imags = fwd_j1(s1_j1, h0o, h1o, False, 1, mode)
+            s2_j1 = torch.sqrt(reals**2 + imags**2 + bias**2)
+            if x.requires_grad:
+                dsdx2_1 = reals/s2_j1
+                dsdy2_1 = imags/s2_j1
+            q = s2_j1.shape
+            s2_j1 = s2_j1.view(q[0], 36, q[2]//6, q[3], q[4])
+            s2_j1 = s2_j1 - bias
+            s1_j1 = F.avg_pool2d(s1_j1, 2)
+            s1_j1 = s1_j1.view(p[0], 6, p[2], p[3]//2, p[4]//2)
+
+            if x.requires_grad:
+                ctx.save_for_backward(h0o, h1o, h0a, h0b, h1a, h1b,
+                                      dsdx1, dsdy1, dsdx2, dsdy2,
+                                      dsdx2_1, dsdy2_1)
+            else:
+                z = x.new_zeros(1)
+                ctx.save_for_backward(h0o, h1o, h0a, h0b, h1a, h1b,
+                                      z, z, z, z, z, z)
+
+            del reals, imags
+            Z = torch.cat((s0[:, None], s1_j1, s1_j2, s2_j1), dim=1)
 
         return Z
 
@@ -256,38 +332,70 @@ class ScatLayerj2_f(torch.autograd.Function):
             h1b_t = h1a
 
             # Level 1 backward (time reversed biorthogonal analysis filters)
-            ds0, ds1_j1, ds1_j2, ds2_j1 = \
-                dZ[:,0], dZ[:,1:7], dZ[:,7:13], dZ[:,13:]
+            if ctx.combine_colour:
+                ds0, ds1_j1, ds1_j2, ds2_j1 = \
+                    dZ[:,:3], dZ[:,3:9], dZ[:,9:15], dZ[:,15:]
+                ds1_j2 = ds1_j2[:, :, None]
 
-            # Inverse second order scattering
-            p = ds1_j1.shape
-            ds1_j1 = ds1_j1.view(p[0], p[2]*6, p[3], p[4])
-            ds1_j1 = 1/4 * F.interpolate(ds1_j1, scale_factor=2, mode="nearest")
-            q = ds2_j1.shape
-            ds2_j1 = ds2_j1.view(q[0], 6, q[2]*6, q[3], q[4])
-            reals = ds2_j1 * dsdx2_1
-            imags = ds2_j1 * dsdy2_1
-            ds1_j1 = inv_j1(
-                ds1_j1, reals, imags, h0o_t, h1o_t, o_dim, h_dim, w_dim, mode)
-            ds1_j1 = ds1_j1.view(p[0], 6, p[2], p[3]*2, p[4]*2)
+                ds1_j1 = 1/4 * F.interpolate(ds1_j1, scale_factor=2, mode="nearest")
+                q = ds2_j1.shape
+                ds2_j1 = ds2_j1.view(q[0], 6, 6, q[2], q[3])
 
-            # Inverse first order scattering j=2
-            ds0 = 1/4 * F.interpolate(ds0, scale_factor=2, mode="nearest")
-            #  s = ds1_j2.shape
-            #  ds1_j2 = ds1_j2.view(s[0], 6, s[1]//6, s[2], s[3])
-            reals = ds1_j2 * dsdx2
-            imags = ds1_j2 * dsdy2
-            ds0 = inv_j2plus(
-                ds0, reals, imags, h0a_t, h1a_t, h0b_t, h1b_t,
-                o_dim, h_dim, w_dim, mode)
+                # Inverse second order scattering
+                reals = ds2_j1 * dsdx2_1
+                imags = ds2_j1 * dsdy2_1
+                ds1_j1 = inv_j1(
+                    ds1_j1, reals, imags, h0o_t, h1o_t, o_dim, h_dim, w_dim, mode)
+                ds1_j1 = ds1_j1[:, :, None]
 
-            # Inverse first order scattering j=1
-            reals = ds1_j1 * dsdx1
-            imags = ds1_j1 * dsdy1
-            dX = inv_j1(
-                ds0, reals, imags, h0o_t, h1o_t, o_dim, h_dim, w_dim, mode)
+                # Inverse first order scattering j=2
+                ds0 = 1/4 * F.interpolate(ds0, scale_factor=2, mode="nearest")
+                #  s = ds1_j2.shape
+                #  ds1_j2 = ds1_j2.view(s[0], 6, s[1]//6, s[2], s[3])
+                reals = ds1_j2 * dsdx2
+                imags = ds1_j2 * dsdy2
+                ds0 = inv_j2plus(
+                    ds0, reals, imags, h0a_t, h1a_t, h0b_t, h1b_t,
+                    o_dim, h_dim, w_dim, mode)
 
-        return (dX,) + (None,) * 8
+                # Inverse first order scattering j=1
+                reals = ds1_j1 * dsdx1
+                imags = ds1_j1 * dsdy1
+                dX = inv_j1(
+                    ds0, reals, imags, h0o_t, h1o_t, o_dim, h_dim, w_dim, mode)
+            else:
+                ds0, ds1_j1, ds1_j2, ds2_j1 = \
+                    dZ[:,0], dZ[:,1:7], dZ[:,7:13], dZ[:,13:]
+                p = ds1_j1.shape
+                ds1_j1 = ds1_j1.view(p[0], p[2]*6, p[3], p[4])
+                ds1_j1 = 1/4 * F.interpolate(ds1_j1, scale_factor=2, mode="nearest")
+                q = ds2_j1.shape
+                ds2_j1 = ds2_j1.view(q[0], 6, q[2]*6, q[3], q[4])
+
+                # Inverse second order scattering
+                reals = ds2_j1 * dsdx2_1
+                imags = ds2_j1 * dsdy2_1
+                ds1_j1 = inv_j1(
+                    ds1_j1, reals, imags, h0o_t, h1o_t, o_dim, h_dim, w_dim, mode)
+                ds1_j1 = ds1_j1.view(p[0], 6, p[2], p[3]*2, p[4]*2)
+
+                # Inverse first order scattering j=2
+                ds0 = 1/4 * F.interpolate(ds0, scale_factor=2, mode="nearest")
+                #  s = ds1_j2.shape
+                #  ds1_j2 = ds1_j2.view(s[0], 6, s[1]//6, s[2], s[3])
+                reals = ds1_j2 * dsdx2
+                imags = ds1_j2 * dsdy2
+                ds0 = inv_j2plus(
+                    ds0, reals, imags, h0a_t, h1a_t, h0b_t, h1b_t,
+                    o_dim, h_dim, w_dim, mode)
+
+                # Inverse first order scattering j=1
+                reals = ds1_j1 * dsdx1
+                imags = ds1_j1 * dsdy1
+                dX = inv_j1(
+                    ds0, reals, imags, h0o_t, h1o_t, o_dim, h_dim, w_dim, mode)
+
+        return (dX,) + (None,) * 9
 
 
 class ScatLayerj2_rot_f(torch.autograd.Function):
@@ -295,7 +403,7 @@ class ScatLayerj2_rot_f(torch.autograd.Function):
     layer with the DTCWT bandpass biorthogonal and qshift filters . """
 
     @staticmethod
-    def forward(ctx, x, h0o, h1o, h2o, h0a, h0b, h1a, h1b, h2a, h2b, mode, bias):
+    def forward(ctx, x, h0o, h1o, h2o, h0a, h0b, h1a, h1b, h2a, h2b, mode, bias, combine_colour):
         #  bias = 1e-2
         #  bias = 0
         ctx.in_shape = x.shape
@@ -303,48 +411,93 @@ class ScatLayerj2_rot_f(torch.autograd.Function):
         assert r % 8 == c % 8 == 0
         mode = int_to_mode(mode)
         ctx.mode = mode
+        ctx.combine_colour = combine_colour
 
         # First order scattering
         s0, reals, imags = fwd_j1_rot(x, h0o, h1o, h2o, False, 1, mode)
-        s1_j1 = torch.sqrt(reals**2 + imags**2 + bias**2)
-        if x.requires_grad:
-            dsdx1 = reals/s1_j1
-            dsdy1 = imags/s1_j1
-        s1_j1 = s1_j1 - bias
+        if combine_colour:
+            s1_j1 = torch.sqrt(reals[:,:,0]**2 + imags[:,:,0]**2 +
+                               reals[:,:,1]**2 + imags[:,:,1]**2 +
+                               reals[:,:,2]**2 + imags[:,:,2]**2 + bias**2)
+            s1_j1 = s1_j1[:, :, None]
+            if x.requires_grad:
+                dsdx1 = reals/s1_j1
+                dsdy1 = imags/s1_j1
+            s1_j1 = s1_j1 - bias
 
-        s0, reals, imags = fwd_j2plus_rot(s0, h0a, h1a, h0b, h1b, h2a, h2b, False, 1, mode)
-        s1_j2 = torch.sqrt(reals**2 + imags**2 + bias**2)
-        if x.requires_grad:
-            dsdx2 = reals/s1_j2
-            dsdy2 = imags/s1_j2
-        s1_j2 = s1_j2 - bias
-        s0 = F.avg_pool2d(s0, 2)
+            s0, reals, imags = fwd_j2plus_rot(s0, h0a, h1a, h0b, h1b, h2a, h2b, False, 1, mode)
+            s1_j2 = torch.sqrt(reals[:,:,0]**2 + imags[:,:,0]**2 +
+                               reals[:,:,1]**2 + imags[:,:,1]**2 +
+                               reals[:,:,2]**2 + imags[:,:,2]**2 + bias**2)
+            s1_j2 = s1_j2[:, :, None]
+            if x.requires_grad:
+                dsdx2 = reals/s1_j2
+                dsdy2 = imags/s1_j2
+            s1_j2 = s1_j2 - bias
+            s0 = F.avg_pool2d(s0, 2)
 
-        # Second order scattering
-        p = s1_j1.shape
-        s1_j1 = s1_j1.view(p[0], 6*p[2], p[3], p[4])
-        s1_j1, reals, imags = fwd_j1_rot(s1_j1, h0o, h1o, h2o, False, 1, mode)
-        s2_j1 = torch.sqrt(reals**2 + imags**2 + bias**2)
-        if x.requires_grad:
-            dsdx2_1 = reals/s2_j1
-            dsdy2_1 = imags/s2_j1
-        q = s2_j1.shape
-        s2_j1 = s2_j1.view(q[0], 36, q[2]//6, q[3], q[4])
-        s2_j1 = s2_j1 - bias
-        s1_j1 = F.avg_pool2d(s1_j1, 2)
-        s1_j1 = s1_j1.view(p[0], 6, p[2], p[3]//2, p[4]//2)
+            # Second order scattering
+            s1_j1 = s1_j1[:, :, 0]
+            s1_j1, reals, imags = fwd_j1_rot(s1_j1, h0o, h1o, h2o, False, 1, mode)
+            s2_j1 = torch.sqrt(reals**2 + imags**2 + bias**2)
+            if x.requires_grad:
+                dsdx2_1 = reals/s2_j1
+                dsdy2_1 = imags/s2_j1
+            q = s2_j1.shape
+            s2_j1 = s2_j1.view(q[0], 36, q[3], q[4])
+            s2_j1 = s2_j1 - bias
+            s1_j1 = F.avg_pool2d(s1_j1, 2)
+            if x.requires_grad:
+                ctx.save_for_backward(h0o, h1o, h2o, h0a, h0b, h1a, h1b, h2a, h2b,
+                                      dsdx1, dsdy1, dsdx2, dsdy2, dsdx2_1,
+                                      dsdy2_1)
+            else:
+                z = x.new_zeros(1)
+                ctx.save_for_backward(h0o, h1o, h2o, h0a, h0b, h1a, h1b, h2a, h2b,
+                                      z, z, z, z, z, z)
 
-        if x.requires_grad:
-            ctx.save_for_backward(h0o, h1o, h2o, h0a, h0b, h1a, h1b, h2a, h2b,
-                                  dsdx1, dsdy1, dsdx2, dsdy2, dsdx2_1,
-                                  dsdy2_1)
+            del reals, imags
+            Z = torch.cat((s0, s1_j1, s1_j2[:, :, 0], s2_j1), dim=1)
         else:
-            z = x.new_zeros(1)
-            ctx.save_for_backward(h0o, h1o, h2o, h0a, h0b, h1a, h1b, h2a, h2b,
-                                  z, z, z, z, z, z)
+            s1_j1 = torch.sqrt(reals**2 + imags**2 + bias**2)
+            if x.requires_grad:
+                dsdx1 = reals/s1_j1
+                dsdy1 = imags/s1_j1
+            s1_j1 = s1_j1 - bias
 
-        del reals, imags
-        Z = torch.cat((s0[:, None], s1_j1, s1_j2, s2_j1), dim=1)
+            s0, reals, imags = fwd_j2plus_rot(s0, h0a, h1a, h0b, h1b, h2a, h2b, False, 1, mode)
+            s1_j2 = torch.sqrt(reals**2 + imags**2 + bias**2)
+            if x.requires_grad:
+                dsdx2 = reals/s1_j2
+                dsdy2 = imags/s1_j2
+            s1_j2 = s1_j2 - bias
+            s0 = F.avg_pool2d(s0, 2)
+
+            # Second order scattering
+            p = s1_j1.shape
+            s1_j1 = s1_j1.view(p[0], 6*p[2], p[3], p[4])
+            s1_j1, reals, imags = fwd_j1_rot(s1_j1, h0o, h1o, h2o, False, 1, mode)
+            s2_j1 = torch.sqrt(reals**2 + imags**2 + bias**2)
+            if x.requires_grad:
+                dsdx2_1 = reals/s2_j1
+                dsdy2_1 = imags/s2_j1
+            q = s2_j1.shape
+            s2_j1 = s2_j1.view(q[0], 36, q[2]//6, q[3], q[4])
+            s2_j1 = s2_j1 - bias
+            s1_j1 = F.avg_pool2d(s1_j1, 2)
+            s1_j1 = s1_j1.view(p[0], 6, p[2], p[3]//2, p[4]//2)
+
+            if x.requires_grad:
+                ctx.save_for_backward(h0o, h1o, h2o, h0a, h0b, h1a, h1b, h2a, h2b,
+                                      dsdx1, dsdy1, dsdx2, dsdy2, dsdx2_1,
+                                      dsdy2_1)
+            else:
+                z = x.new_zeros(1)
+                ctx.save_for_backward(h0o, h1o, h2o, h0a, h0b, h1a, h1b, h2a, h2b,
+                                      z, z, z, z, z, z)
+
+            del reals, imags
+            Z = torch.cat((s0[:, None], s1_j1, s1_j2, s2_j1), dim=1)
 
         return Z
 
@@ -375,37 +528,72 @@ class ScatLayerj2_rot_f(torch.autograd.Function):
             h2b_t = h2a
 
             # Level 1 backward (time reversed biorthogonal analysis filters)
-            ds0, ds1_j1, ds1_j2, ds2_j1 = \
-                dZ[:,0], dZ[:,1:7], dZ[:,7:13], dZ[:,13:]
+            if ctx.combine_colour:
+                ds0, ds1_j1, ds1_j2, ds2_j1 = \
+                    dZ[:,:3], dZ[:,3:9], dZ[:,9:15], dZ[:,15:]
+                ds1_j2 = ds1_j2[:, :, None]
 
-            # Inverse second order scattering
-            p = ds1_j1.shape
-            ds1_j1 = ds1_j1.view(p[0], p[2]*6, p[3], p[4])
-            ds1_j1 = 1/4 * F.interpolate(ds1_j1, scale_factor=2, mode="nearest")
-            q = ds2_j1.shape
-            ds2_j1 = ds2_j1.view(q[0], 6, q[2]*6, q[3], q[4])
-            reals = ds2_j1 * dsdx2_1
-            imags = ds2_j1 * dsdy2_1
-            ds1_j1 = inv_j1_rot(
-                ds1_j1, reals, imags, h0o_t, h1o_t, h2o_t,
-                o_dim, h_dim, w_dim, mode)
-            ds1_j1 = ds1_j1.view(p[0], 6, p[2], p[3]*2, p[4]*2)
+                # Inverse second order scattering
+                ds1_j1 = 1/4 * F.interpolate(ds1_j1, scale_factor=2, mode="nearest")
+                q = ds2_j1.shape
+                ds2_j1 = ds2_j1.view(q[0], 6, 6, q[2], q[3])
 
-            # Inverse first order scattering j=2
-            ds0 = 1/4 * F.interpolate(ds0, scale_factor=2, mode="nearest")
-            #  s = ds1_j2.shape
-            #  ds1_j2 = ds1_j2.view(s[0], 6, s[1]//6, s[2], s[3])
-            reals = ds1_j2 * dsdx2
-            imags = ds1_j2 * dsdy2
-            ds0 = inv_j2plus_rot(
-                ds0, reals, imags, h0a_t, h1a_t, h0b_t, h1b_t, h2a_t, h2b_t,
-                o_dim, h_dim, w_dim, mode)
+                # Inverse second order scattering
+                reals = ds2_j1 * dsdx2_1
+                imags = ds2_j1 * dsdy2_1
+                ds1_j1 = inv_j1_rot(
+                    ds1_j1, reals, imags, h0o_t, h1o_t, h2o_t,
+                    o_dim, h_dim, w_dim, mode)
+                ds1_j1 = ds1_j1[:, :, None]
 
-            # Inverse first order scattering j=1
-            reals = ds1_j1 * dsdx1
-            imags = ds1_j1 * dsdy1
-            dX = inv_j1_rot(
-                ds0, reals, imags, h0o_t, h1o_t, h2o_t,
-                o_dim, h_dim, w_dim, mode)
+                # Inverse first order scattering j=2
+                ds0 = 1/4 * F.interpolate(ds0, scale_factor=2, mode="nearest")
+                #  s = ds1_j2.shape
+                #  ds1_j2 = ds1_j2.view(s[0], 6, s[1]//6, s[2], s[3])
+                reals = ds1_j2 * dsdx2
+                imags = ds1_j2 * dsdy2
+                ds0 = inv_j2plus_rot(
+                    ds0, reals, imags, h0a_t, h1a_t, h0b_t, h1b_t, h2a_t, h2b_t,
+                    o_dim, h_dim, w_dim, mode)
 
-        return (dX,) + (None,) * 11
+                # Inverse first order scattering j=1
+                reals = ds1_j1 * dsdx1
+                imags = ds1_j1 * dsdy1
+                dX = inv_j1_rot(
+                    ds0, reals, imags, h0o_t, h1o_t, h2o_t,
+                    o_dim, h_dim, w_dim, mode)
+            else:
+                ds0, ds1_j1, ds1_j2, ds2_j1 = \
+                    dZ[:,0], dZ[:,1:7], dZ[:,7:13], dZ[:,13:]
+
+                # Inverse second order scattering
+                p = ds1_j1.shape
+                ds1_j1 = ds1_j1.view(p[0], p[2]*6, p[3], p[4])
+                ds1_j1 = 1/4 * F.interpolate(ds1_j1, scale_factor=2, mode="nearest")
+                q = ds2_j1.shape
+                ds2_j1 = ds2_j1.view(q[0], 6, q[2]*6, q[3], q[4])
+                reals = ds2_j1 * dsdx2_1
+                imags = ds2_j1 * dsdy2_1
+                ds1_j1 = inv_j1_rot(
+                    ds1_j1, reals, imags, h0o_t, h1o_t, h2o_t,
+                    o_dim, h_dim, w_dim, mode)
+                ds1_j1 = ds1_j1.view(p[0], 6, p[2], p[3]*2, p[4]*2)
+
+                # Inverse first order scattering j=2
+                ds0 = 1/4 * F.interpolate(ds0, scale_factor=2, mode="nearest")
+                #  s = ds1_j2.shape
+                #  ds1_j2 = ds1_j2.view(s[0], 6, s[1]//6, s[2], s[3])
+                reals = ds1_j2 * dsdx2
+                imags = ds1_j2 * dsdy2
+                ds0 = inv_j2plus_rot(
+                    ds0, reals, imags, h0a_t, h1a_t, h0b_t, h1b_t, h2a_t, h2b_t,
+                    o_dim, h_dim, w_dim, mode)
+
+                # Inverse first order scattering j=1
+                reals = ds1_j1 * dsdx1
+                imags = ds1_j1 * dsdy1
+                dX = inv_j1_rot(
+                    ds0, reals, imags, h0o_t, h1o_t, h2o_t,
+                    o_dim, h_dim, w_dim, mode)
+
+        return (dX,) + (None,) * 12

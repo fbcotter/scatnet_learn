@@ -8,7 +8,7 @@ import os
 import torch
 import torch.nn as nn
 import time
-from scatnet_learn.layers import InvariantLayerj1, ScatLayerj1, ScatLayer
+from scatnet_learn.layers import InvariantLayerj1, ScatLayerj1
 import torch.nn.functional as func
 import numpy as np
 from math import ceil
@@ -71,15 +71,18 @@ nets = {'ref': [('conv', 3, 21, 0), ('pool', 1, None, None),
                 ('conv', 147, 2*C, p), ('conv', 2*C, 2*C, p),
                 ('conv', 2*C, 4*C, p), ('conv', 4*C, 4*C, p)],
         'scatA':[('scat', 3, None, None), ('scat', 21, None, None),
-                 ('conv', 147, 2*C, p), ('conv', 2*C, 2*C, p),
-                 ('conv', 2*C, 4*C, p), ('conv', 4*C, 4*C, p)],
+                 ('conv', 147, 2*C, p), ('conv', 2*C, 4*C, p),
+                 ('conv', 4*C, 4*C, p), ('conv', 4*C, 4*C, p)],
+        'scatA2':[('scatcolour', 3, None, None), ('scat', 9, None, None),
+                 ('conv', 63, 2*C, p), ('conv', 2*C, 4*C, p),
+                 ('conv', 4*C, 4*C, p), ('conv', 4*C, 4*C, p)],
         'scatB':[('inv', 3, 21, 2), ('inv', 21, 147, 2),
                  ('conv', 147, 2*C, p), ('conv', 2*C, 4*C, p),
                  ('conv', 4*C, 4*C, p), ('conv', 4*C, 4*C, p)],
         'scatC':[('conv', 3, 16, 0),
                  ('scat', 16, None, None), ('scat', 16*7, None, None),
-                 ('conv', 16*49, 2*C, p), ('conv', 2*C, 2*C, p),
-                 ('conv', 2*C, 4*C, p), ('conv', 4*C, 4*C, p)],
+                 ('conv', 16*49, 2*C, p), ('conv', 2*C, 4*C, p),
+                 ('conv', 4*C, 4*C, p), ('conv', 4*C, 4*C, p)],
         'scatD':[('conv', 3, 16, 0),
                  ('inv', 16, 16*7, 2), ('inv', 16*7, 16*49, 2),
                  ('conv', 16*49, 2*C, p), ('conv', 2*C, 4*C, p),
@@ -90,8 +93,8 @@ nets = {'ref': [('conv', 3, 21, 0), ('pool', 1, None, None),
                   ('conv', 4*C, 4*C, p), ('conv', 4*C, 4*C, p)],
         'scatD2':[('conv', 3, 16, 0),
                   ('inv', 16, 112, 2), ('inv', 112, 147, 2),
-                  ('conv', 147, 2*C, p), ('conv', 2*C, 2*C, p),
-                  ('conv', 2*C, 4*C, p), ('conv', 4*C, 4*C, p)],}
+                  ('conv', 147, 2*C, p), ('conv', 2*C, 4*C, p),
+                  ('conv', 4*C, 4*C, p), ('conv', 4*C, 4*C, p)],}
 
 
 class ScatNet(nn.Module):
@@ -133,6 +136,12 @@ class ScatNet(nn.Module):
             elif typ == 'pool':
                 name = 'pool' + str(C1)
                 blk = nn.MaxPool2d(2)
+            elif typ == 'scatcolour':
+                name = 'scat' + letter
+                blk = nn.Sequential(
+                    ScatLayerj1(magbias=b, combine_colour=True),
+                    nn.BatchNorm2d(9), nn.ReLU())
+                layer += 1
             elif typ == 'scat':
                 name = 'scat' + letter
                 blk = nn.Sequential(
@@ -219,20 +228,17 @@ class TrainNET(BaseClass):
                 32, args.datadir, dataset=dataset,
                 batch_size=args.batch_size, trainsize=args.trainsize,
                 seed=args.seed, **kwargs)
+            θ = (0.5, 0.9, 1e-4, 1.5)
         elif dataset == 'tiny_imagenet':
             self.train_loader, self.test_loader = tiny_imagenet.get_data(
                 64, args.datadir, val_only=False,
                 batch_size=args.batch_size, trainsize=args.trainsize,
                 seed=args.seed, distributed=False, **kwargs)
+            θ = (0.2, 0.9, 1e-4, 1.5)
 
         # ######################################################################
         # Build the network based on the type parameter. θ are the optimal
         # hyperparameters found by cross validation.
-        if type_ == 'ref':
-            θ = (0.1, 0.9, 1e-4, 1)
-        else:
-            θ = (0.2, 0.9, 1e-4, 1.5)
-            #  raise ValueError('Unknown type')
         lr, mom, wd, std = θ
         # If the parameters were provided as an option, use them
         lr = config.get('lr', lr)

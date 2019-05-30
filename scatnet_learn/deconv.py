@@ -8,6 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Function
 from scatnet_learn.layers import ScatLayerj1
+from collections import OrderedDict
 #  from scatnet_learn.lowlevel import int_to_mode, fwd_j1, inv_j1
 
 
@@ -88,30 +89,32 @@ class ReLU(nn.Module):
 
 def distill_sequential(module):
     out = []
-    for m in module.children():
+    for n, m in module.named_children():
         name = m.__class__.__name__
         if name == 'ScatLayerj1':
-            out.append(ScatLayerj1(
-                biort=m.biort, mode=m.mode_str, magbias=m.magbias))
+            out.append((n, ScatLayerj1(
+                biort=m.biort, mode=m.mode_str, magbias=m.magbias)))
         elif name == 'BatchNorm2d':
-            out.append(nn.BatchNorm2d(
-                m.num_features, eps=m.eps))
-            out[-1].weight.data = m.weight.data
-            out[-1].bias.data = m.bias.data
-            out[-1].running_mean.data = m.running_mean.data
-            out[-1].running_var.data = m.running_var.data
+            out.append((n, nn.BatchNorm2d(
+                m.num_features, eps=m.eps)))
+            out[-1][1].weight.data = m.weight.data
+            out[-1][1].bias.data = m.bias.data
+            out[-1][1].running_mean.data = m.running_mean.data
+            out[-1][1].running_var.data = m.running_var.data
         elif name == 'Conv2d':
-            out.append(nn.Conv2d(
+            out.append((n, nn.Conv2d(
                 m.in_channels, m.out_channels, m.kernel_size,
                 m.stride, m.padding, m.dilation, m.groups,
-                bias=(m.bias is not None)))
-            out[-1].weight.data = m.weight.data
+                bias=(m.bias is not None))))
+            out[-1][1].weight.data = m.weight.data
             if m.bias is not None:
-                out[-1].bias.data = m.bias.data
+                out[-1][1].bias.data = m.bias.data
         elif name == 'ReLU':
-            out.append(ReLU())
+            out.append((n, ReLU()))
         elif name == 'Sequential':
-            out.append(distill_sequential(m))
+            out.append((n, distill_sequential(m)))
+        elif name == 'Dropout':
+            pass
         else:
             raise ValueError("Unkown Module {}".format(name))
-    return out
+    return nn.Sequential(OrderedDict(out))

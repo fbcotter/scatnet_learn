@@ -13,12 +13,30 @@ def test_grad_scat(biort):
     gradcheck(scat, (x,))
 
 
+@pytest.mark.parametrize('biort', ['near_sym_a', 'near_sym_b', 'near_sym_b_bp'])
+def test_grad_scat_colour(biort):
+    x = torch.randn(1, 3, 32, 32, requires_grad=True, dtype=torch.double)
+    scat = ScatLayerj1(biort=biort, combine_colour=True)
+    scat = scat.to(torch.double)
+    gradcheck(scat, (x,))
+
+
 @pytest.mark.parametrize('biort,qshift', [('near_sym_a', 'qshift_a'),
                                           ('near_sym_b', 'qshift_b'),
                                           ('near_sym_b_bp', 'qshift_b_bp')])
 def test_grad_scatj2(biort, qshift):
     x = torch.randn(1, 3, 32, 32, requires_grad=True, dtype=torch.double)
     scat = ScatLayerj2(biort=biort, qshift=qshift)
+    scat = scat.to(torch.double)
+    gradcheck(scat, (x,))
+
+
+@pytest.mark.parametrize('biort,qshift', [('near_sym_a', 'qshift_a'),
+                                          ('near_sym_b', 'qshift_b'),
+                                          ('near_sym_b_bp', 'qshift_b_bp')])
+def test_grad_scatj2_colour(biort, qshift):
+    x = torch.randn(1, 3, 32, 32, requires_grad=True, dtype=torch.double)
+    scat = ScatLayerj2(biort=biort, qshift=qshift, combine_colour=True)
     scat = scat.to(torch.double)
     gradcheck(scat, (x,))
 
