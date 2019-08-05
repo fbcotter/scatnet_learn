@@ -2,10 +2,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as func
 from pytorch_wavelets.dtcwt.coeffs import biort as _biort, qshift as _qshift
+from pytorch_wavelets import DTCWTForward
 from pytorch_wavelets.dtcwt.lowlevel import prep_filt
-from scatnet_learn.lowlevel import mode_to_int
+from scatnet_learn.lowlevel import mode_to_int, MagFn, correct_phases, add_conjugates
 from scatnet_learn.lowlevel import ScatLayerj1_f, ScatLayerj1_rot_f
 from scatnet_learn.lowlevel import ScatLayerj2_f, ScatLayerj2_rot_f
+from scatnet_learn.filters import filters_rotated
 import torch.nn.init as init
 import numpy as np
 
@@ -327,7 +329,7 @@ class ScatLayerj2(nn.Module):
             the magnitude highpass outputs.
     """
     def __init__(self, biort='near_sym_a', qshift='qshift_a', mode='symmetric',
-                 magbias=1e-2, combine_colour=False):
+                 magbias=1e-2, combine_colour=False, J=2):
         super().__init__()
         self.biort = biort
         self.qshift = biort
@@ -337,6 +339,7 @@ class ScatLayerj2(nn.Module):
         self.mode = mode_to_int(mode)
         self.magbias = magbias
         self.combine_colour = combine_colour
+        self.J = J
         if biort == 'near_sym_b_bp':
             assert qshift == 'qshift_b_bp'
             self.bandpass_diag = True
@@ -395,8 +398,140 @@ class ScatLayerj2(nn.Module):
         if not self.combine_colour:
             b, _, c, h, w = Z.shape
             Z = Z.view(b, 49*c, h, w)
+        if self.J > 2:
+            Z = func.avg_pool2d(Z, 2**(self.J-2))
         return Z
 
     def extra_repr(self):
         return "biort='{}', mode='{}', magbias={}".format(
                self.biort, self.mode_str, self.magbias)
+
+
+class LogScale(nn.Module):
+    def __init__(self, C1, C2, gain=0.1, momentum=0.1):
+        super().__init__()
+        self.C1 = C1
+        self.C2 = C2
+        self.running_var = nn.Parameter(torch.ones(1, C2, 1, 1), requires_grad=False)
+        self.momentum = momentum
+        self.gain = gain
+        self.k = 1
+
+    def forward(self, x):
+        if self.training:
+            m = self.momentum
+            sample_var = x.data.var(dim=(0,2,3), keepdim=True)
+            self.running_var.data = m * self.running_var + (1 - m) * sample_var
+            self.running_var.data[:,:self.C1] = 1
+            self.k += 1
+        return torch.log(func.relu(x) + self.gain*torch.sqrt(self.running_var))
+
+
+class ScatLayerj2_corners(nn.Module):
+    """ Does one order of scattering at a single scale. Can be made into a
+    second order scatternet by stacking two of these layers.
+
+    Inputs:
+        biort (str): the biorthogonal filters to use. if 'near_sym_b_bp' will
+            use the rotationally symmetric filters. These have 13 and 19 taps
+            so are quite long. They also require 7 1D convolutions instead of 6.
+        x (torch.tensor): Input of shape (N, C, H, W)
+        mode (str): padding mode. Can be 'symmetric' or 'zero'
+
+    Returns:
+        y (torch.tensor): y has the lowpass and invariant U terms stacked along
+            the channel dimension, and so has shape (N, 7*C, H/2, W/2). Where
+            the first C channels are the lowpass outputs, and the next 6C are
+            the magnitude highpass outputs.
+    """
+    def __init__(self, biort='near_sym_a', qshift='qshift_a', mode='symmetric',
+                 magbias=1e-2, combine_colour=False):
+        super().__init__()
+        # Have to convert the string to an int as the grad checks don't work
+        # with string inputs
+        self.combine_colour = combine_colour
+        self.MagFn1 = MagFn(b=magbias, c=1)
+        self.MagFn2 = MagFn(b=magbias, c=1)
+        self.MagFn1c = MagFn(b=magbias, c=1)
+        self.MagFn2c = MagFn(b=magbias, c=1)
+        self.MagFn3 = MagFn(b=magbias, c=1)
+        self.xfm1 = DTCWTForward(
+            J=2, biort=biort, qshift=qshift, o_dim=2, ri_dim=-1, mode=mode)
+        self.xfm2 = DTCWTForward(
+            J=1, biort=biort, qshift=qshift, o_dim=2, ri_dim=-1, mode=mode)
+        Hr, Hi = filters_rotated()
+        self.Hr = nn.Parameter(Hr, requires_grad=False)
+        self.Hi = nn.Parameter(Hi, requires_grad=False)
+
+    def forward(self, x):
+        # Ensure the input size is divisible by 8
+        ch, r, c = x.shape[1:]
+        rem = r % 8
+        if rem != 0:
+            rows_after = (9-rem)//2
+            rows_before = (8-rem) // 2
+            x = torch.cat((x[:,:,:rows_before], x,
+                           x[:,:,-rows_after:]), dim=2)
+        rem = c % 8
+        if rem != 0:
+            cols_after = (9-rem)//2
+            cols_before = (8-rem) // 2
+            x = torch.cat((x[:,:,:,:cols_before], x,
+                           x[:,:,:,-cols_after:]), dim=3)
+
+        if self.combine_colour:
+            assert ch == 3
+
+        yl, (yh1, yh2) = self.xfm1(x)
+
+        if self.combine_colour:
+            yh1 = 0.3*yh1[:,0] + 0.6*yh1[:,1] + 0.1*yh1[:,2]
+            yh1 = yh1[:, None]
+            yh2 = 0.3*yh2[:,0] + 0.6*yh2[:,1] + 0.1*yh2[:,2]
+            yh2 = yh2[:,None]
+        reals1, imags1 = torch.unbind(yh1, dim=-1)
+        reals2, imags2 = torch.unbind(yh2, dim=-1)
+        r1, i1 = correct_phases(reals1, imags1, dim=2)
+        r2, i2 = correct_phases(reals2, imags2, dim=2)
+        r1, i1 = add_conjugates(r1, i1, dim=2)
+        r2, i2 = add_conjugates(r2, i2, dim=2)
+
+        # Make the corners
+        def cconv(r, i, hr, hi):
+            s = r.shape
+            r = r.view(s[0], s[1]*s[2], s[3], s[4])
+            i = i.view(s[0], s[1]*s[2], s[3], s[4])
+            cr = func.conv2d(r, torch.cat([hr]*s[1], dim=0), padding=1, groups=s[1]) - \
+                func.conv2d(i, torch.cat([hi]*s[1], dim=0), padding=1, groups=s[1])
+            ci = func.conv2d(r, torch.cat([hi]*s[1], dim=0), padding=1, groups=s[1]) + \
+                func.conv2d(i, torch.cat([hr]*s[1], dim=0), padding=1, groups=s[1])
+            cr = cr.view(s[0], s[1], hr.shape[0], s[3], s[4])
+            ci = ci.view(s[0], s[1], hr.shape[0], s[3], s[4])
+            return cr, ci
+        c1r, c1i = cconv(r1, i1, self.Hr, self.Hi)
+        c2r, c2i = cconv(r2, i2, self.Hr, self.Hi)
+        # Stack the corners and the edges
+        #  reals1 = torch.cat((reals1, c1r), dim=2)
+        #  imags1 = torch.cat((imags1, c1i), dim=2)
+        #  reals2 = torch.cat((reals2, c2r), dim=2)
+        #  imags2 = torch.cat((imags2, c2i), dim=2)
+        m1 = self.MagFn1((reals1, imags1))
+        m1c = self.MagFn1c((c1r, c1i))
+        m2 = self.MagFn2((reals2, imags2))
+        m2c = self.MagFn2c((c2r, c2i))
+
+        # Make the second scale scattering
+        m1, yh = self.xfm2(m1)
+        reals1, imags1 = torch.unbind(yh[0], dim=-1)
+        #  r1, i1 = correct_phases(reals1, imags1)
+        #  r1, i1 = add_conjugates(r1, i1)
+        #  c1r, c1i = cconv(r1, i1, self.Hr, self.Hi)
+        #  # Stack the corners and the edges
+        #  reals1 = torch.cat((reals1, c1r), dim=2)
+        #  imags1 = torch.cat((imags1, c1i), dim=2)
+        m2_2 = self.MagFn3((reals1, imags1))
+
+        yl = func.avg_pool2d(yl, 2)
+        m1 = func.avg_pool2d(m1, 2)
+        m1c = func.avg_pool2d(m1c, 2)
+        return torch.cat((yl, m1, m1c, m2, m2c, m2_2), dim=1)

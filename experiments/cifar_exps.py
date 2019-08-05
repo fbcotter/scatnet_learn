@@ -133,7 +133,7 @@ allnets = {
 }
 
 
-class MixedNet(MyModule):
+class MixedNet(nn.Module)
     """ MixedNet allows custom definition of conv/inv layers as you would
     a normal network. You can change the ordering below to suit your
     task

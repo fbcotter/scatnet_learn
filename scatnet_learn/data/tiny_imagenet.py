@@ -1,4 +1,5 @@
 from torchvision import transforms, datasets
+import PIL.Image
 import torch
 import os
 import sys
@@ -54,13 +55,14 @@ def get_data(in_size, data_dir, val_only=False, batch_size=128,
 
     # Get the test loader
     transform_test = transforms.Compose([
+        #  transforms.RandomRotation((30, 30), PIL.Image.BILINEAR),
         transforms.CenterCrop(in_size),
         transforms.ToTensor(),
         normalize
     ])
     testloader = torch.utils.data.DataLoader(
         datasets.ImageFolder(valdir, transform_test),
-        batch_size=batch_size, shuffle=False,
+        batch_size=100, shuffle=False,
         num_workers=num_workers, pin_memory=pin_memory,
         worker_init_fn=worker_init_fn)
 

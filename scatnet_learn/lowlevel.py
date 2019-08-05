@@ -68,6 +68,60 @@ class SmoothMagFn(torch.autograd.Function):
         return dx, dy, None
 
 
+class SmoothMagFnColour(torch.autograd.Function):
+    """ Class to do complex magnitude """
+    @staticmethod
+    def forward(ctx, x, y, b, c):
+        ctx.c = c
+        if c == 1:
+            r = torch.sqrt(x[:,0]**2 + y[:,0]**2 +
+                           x[:,1]**2 + y[:,1]**2 +
+                           x[:,2]**2 + y[:,2]**2 + b**2)
+            r2 = r[:, None]
+        elif c == 2:
+            r = torch.sqrt(x[:,:,0]**2 + y[:,:,0]**2 +
+                           x[:,:,1]**2 + y[:,:,1]**2 +
+                           x[:,:,2]**2 + y[:,:,2]**2 + b**2)
+            r2 = r[:, :, None]
+
+        if x.requires_grad:
+            dx = x/r2
+            dy = y/r2
+            ctx.save_for_backward(dx, dy)
+
+        return r - b
+
+    @staticmethod
+    def backward(ctx, dr):
+        dx = None
+        if ctx.needs_input_grad[0]:
+            drdx, drdy = ctx.saved_tensors
+            if ctx.c == 1:
+                dx = drdx * dr[:, None]
+                dy = drdy * dr[:, None]
+            if ctx.c == 2:
+                dx = drdx * dr[:, :, None]
+                dy = drdy * dr[:, :, None]
+        return dx, dy, None, None
+
+
+class MagFn(torch.nn.Module):
+    def __init__(self, b, combine_colour=False, c=1):
+        super().__init__()
+        self.b = b
+        self.combine_colour = combine_colour
+        self.c = c
+
+    def forward(self, x):
+        r, i = x
+        if self.combine_colour:
+            return SmoothMagFnColour.apply(r, i, self.b, self.c)
+        else:
+            y = SmoothMagFn.apply(r, i, self.b)
+            s = y.shape
+            return y.view(s[0], s[1]*s[2], s[3], s[4])
+
+
 class ScatLayerj1_f(torch.autograd.Function):
     """ Function to do forward and backward passes of a single scattering
     layer with the DTCWT biorthogonal filters. """
@@ -597,3 +651,76 @@ class ScatLayerj2_rot_f(torch.autograd.Function):
                     o_dim, h_dim, w_dim, mode)
 
         return (dX,) + (None,) * 12
+
+
+def correct_phases(reals, imags, dim, inv=False):
+    """ Corrects wavelet phases so the centres line up.
+
+    i.e. This makes sure the centre of the real wavelet is a zero crossing for
+    all orientations.
+
+    For the inverse path, we needed to multiply the coefficients by the phase
+    correcting factor of: [1j, -1j, 1j, -1, 1, -1].
+    For the forward path, we divide by these numbers, or multiply by their
+    complex conjugate.
+
+    Parameters
+    ----------
+    reals: torch.tensor of floats with the 6 orientations in the second
+        dimension
+    imags: torch.tensor of floats with the 6 orientations in the second
+        dimension
+    inv : bool
+        Whether this is the forward or backward pass.  Default is false (i.e.
+        forward)
+    """
+    r = torch.empty_like(reals)
+    i = torch.empty_like(imags)
+    if dim == 2:
+        if inv:
+            m1 = torch.tensor([1, -1, 1], dtype=imags.dtype, device=imags.device)
+            m2 = torch.tensor([-1, 1, -1], dtype=imags.dtype, device=imags.device)
+            m1 = m1.view(1, 1, 3, 1, 1)
+            m2 = m2.view(1, 1, 3, 1, 1)
+        else:
+            m1 = torch.tensor([-1, 1, -1], dtype=imags.dtype, device=imags.device)
+            m2 = torch.tensor([-1, 1, -1], dtype=imags.dtype, device=imags.device)
+            m1 = m1.view(1, 1, 3, 1, 1)
+            m2 = m2.view(1, 1, 3, 1, 1)
+        r[:,:,:3] = imags[:,:,:3] * m1
+        i[:,:,:3] = reals[:,:,:3] * -m1
+        r[:,:,3:] = reals[:,:,3:] * m2
+        i[:,:,3:] = imags[:,:,3:] * m2
+    elif dim == 1:
+        if inv:
+            m1 = torch.tensor([1, -1, 1], dtype=imags.dtype, device=imags.device)
+            m2 = torch.tensor([-1, 1, -1], dtype=imags.dtype, device=imags.device)
+            m1 = m1.view(1, 3, 1, 1)
+            m2 = m2.view(1, 3, 1, 1)
+        else:
+            m1 = torch.tensor([-1, 1, -1], dtype=imags.dtype, device=imags.device)
+            m2 = torch.tensor([-1, 1, -1], dtype=imags.dtype, device=imags.device)
+            m1 = m1.view(1, 3, 1, 1)
+            m2 = m2.view(1, 3, 1, 1)
+        r[:,:3] = imags[:,:3] * m1
+        i[:,:3] = reals[:,:3] * -m1
+        r[:,3:] = reals[:,3:] * m2
+        i[:,3:] = imags[:,3:] * m2
+    return r, i
+
+
+def add_conjugates(reals, imags, dim):
+    """ Concatenate tensor with its conjugates.
+
+    The DTCWT returns an array of 6 orientations for each coordinate,
+    corresponding to the 6 orientations of [15, 45, 75, 105, 135, 165]. We can
+    get another 6 rotations by taking complex conjugates of these.
+
+    """
+    return torch.cat((reals, reals), dim=dim), torch.stack((imags, -imags), dim=dim)
+
+
+def collapse_conjugates(reals, imags):
+    """ Concatenate tensor with its conjugates.
+    """
+    return reals[:,:,:6] + reals[:,:,6:], imags[:,:,:6] - imags[:,:,6:]

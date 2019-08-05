@@ -8,7 +8,8 @@ import os
 import torch
 import torch.nn as nn
 import time
-from scatnet_learn.layers import InvariantLayerj1, ScatLayerj1
+from scatnet_learn.layers import InvariantLayerj1, ScatLayerj1, ScatLayerj2
+from scatnet_learn.layers import ScatLayerj2_corners, LogScale
 import torch.nn.functional as func
 import numpy as np
 from math import ceil
@@ -73,8 +74,11 @@ nets = {'ref': [('conv', 3, 21, 0), ('pool', 1, None, None),
         'scatA':[('scat', 3, None, None), ('scat', 21, None, None),
                  ('conv', 147, 2*C, p), ('conv', 2*C, 4*C, p),
                  ('conv', 4*C, 4*C, p), ('conv', 4*C, 4*C, p)],
-        'scatA2':[('scatcolour', 3, None, None), ('scat', 9, None, None),
-                 ('conv', 63, 2*C, p), ('conv', 2*C, 4*C, p),
+        'scatA2':[('scatcolour', 3, None, None),
+                 ('conv', 51, 2*C, p), ('conv', 2*C, 4*C, p),
+                 ('conv', 4*C, 4*C, p), ('conv', 4*C, 4*C, p)],
+        'scatA3':[('scatcorner', 3, None, None),
+                 ('conv', 123, 2*C, p), ('conv', 2*C, 4*C, p),
                  ('conv', 4*C, 4*C, p), ('conv', 4*C, 4*C, p)],
         'scatB':[('inv', 3, 21, 2), ('inv', 21, 147, 2),
                  ('conv', 147, 2*C, p), ('conv', 2*C, 4*C, p),
@@ -136,11 +140,17 @@ class ScatNet(nn.Module):
             elif typ == 'pool':
                 name = 'pool' + str(C1)
                 blk = nn.MaxPool2d(2)
+            elif typ == 'scatcorner':
+                name = 'scat' + letter
+                blk = nn.Sequential(
+                    ScatLayerj2_corners(magbias=b, combine_colour=True),
+                    nn.BatchNorm2d(123), nn.ReLU())
+                layer += 1
             elif typ == 'scatcolour':
                 name = 'scat' + letter
                 blk = nn.Sequential(
-                    ScatLayerj1(magbias=b, combine_colour=True),
-                    nn.BatchNorm2d(9), nn.ReLU())
+                    ScatLayerj2(magbias=b, combine_colour=True),
+                    nn.BatchNorm2d(51), nn.ReLU())
                 layer += 1
             elif typ == 'scat':
                 name = 'scat' + letter

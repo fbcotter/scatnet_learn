@@ -8,7 +8,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Function
 from scatnet_learn.layers import ScatLayerj1
+from scatnet_learn.lowlevel import ScatLayerj2_rot_f, mode_to_int, int_to_mode
 from collections import OrderedDict
+from pytorch_wavelets.dtcwt.transform_funcs import fwd_j1, inv_j1
+from pytorch_wavelets.dtcwt.transform_funcs import fwd_j1_rot, inv_j1_rot
+from pytorch_wavelets.dtcwt.transform_funcs import fwd_j2plus, inv_j2plus
+from pytorch_wavelets.dtcwt.transform_funcs import fwd_j2plus_rot, inv_j2plus_rot
+from pytorch_wavelets.dtcwt.lowlevel import prep_filt
+from pytorch_wavelets.dtcwt.coeffs import biort as _biort, qshift as _qshift
 #  from scatnet_learn.lowlevel import int_to_mode, fwd_j1, inv_j1
 
 
