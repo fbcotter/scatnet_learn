@@ -1,6 +1,6 @@
 from torch.autograd import gradcheck
 from scatnet_learn.layers import ScatLayerj1, ScatLayerj2
-from scatnet_learn.lowlevel import SmoothMagFn
+from scatnet_learn.lowlevel import SmoothMagFn, SmoothMagFnColour
 import torch
 import pytest
 
@@ -62,3 +62,13 @@ def test_grad_mag(magbias):
     x = torch.randn(1, 3, 32, 32, requires_grad=True, dtype=torch.double)
     y = torch.randn(1, 3, 32, 32, requires_grad=True, dtype=torch.double)
     gradcheck(SmoothMagFn.apply, (x, y, magbias))
+
+
+@pytest.mark.parametrize('magbias', [0, 1e-1, 1e-2, 1e-3])
+def test_grad_mag_colour(magbias):
+    x = torch.randn(1, 3, 6, 32, 32, requires_grad=True, dtype=torch.double)
+    y = torch.randn(1, 3, 6, 32, 32, requires_grad=True, dtype=torch.double)
+    gradcheck(SmoothMagFnColour.apply, (x, y, magbias, 1))
+    x = torch.randn(1, 6, 3, 32, 32, requires_grad=True, dtype=torch.double)
+    y = torch.randn(1, 6, 3, 32, 32, requires_grad=True, dtype=torch.double)
+    gradcheck(SmoothMagFnColour.apply, (x, y, magbias, 2))

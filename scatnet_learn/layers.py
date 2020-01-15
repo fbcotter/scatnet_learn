@@ -45,13 +45,13 @@ def dct_bases():
     from scipy.fftpack import idct
     """ Get the top 3 dct bases """
     x = np.zeros((1,1,3,3))
-    x[0,0,0,0] = 1/9
+    x[0,0,0,0] = 1
     lp = idct(idct(x, axis=-2, norm='ortho'), axis=-1, norm='ortho')
     x[0,0,0,0] = 0
-    x[0,0,0,1] = 1/9
+    x[0,0,0,1] = 1
     horiz = idct(idct(x, axis=-2, norm='ortho'), axis=-1, norm='ortho')
     x[0,0,0,1] = 0
-    x[0,0,1,0] = 1/9
+    x[0,0,1,0] = 1
     vertic = idct(idct(x, axis=-2, norm='ortho'), axis=-1, norm='ortho')
 
     return (torch.tensor(lp, dtype=torch.float32),
@@ -81,63 +81,92 @@ class InvariantLayerj1(nn.Module):
                     pixel),
                 - 'smooth' (randomly shifts a gaussian left/right and up/down
                     by 1 pixel and uses the mixing matrix to expand this.
+                - 'full' does a 3x3 convolution fully learned
+                - 'dct'
+                - 'random'
+
         biort (str): which biorthogonal filters to use.
 
     Returns:
         y (torch.tensor): The output
 
     """
-    def __init__(self, C, F=None, stride=2, k=1, alpha=None,
+    def __init__(self, C, F=None, stride=2, alpha=None,
                  biort='near_sym_a', mode='symmetric', magbias=1e-2):
         super().__init__()
         if F is None:
             F = 7*C
-        if k > 1 and alpha is not None:
-            raise ValueError("Only use alpha when k=1")
 
         self.scat = ScatLayerj1(biort=biort, mode=mode, magbias=magbias)
-        self.stride = stride
+
         # Create the learned mixing weights and possibly the expansion kernel
-        self.A = nn.Parameter(torch.randn(F, 7*C, k, k))
-        init.xavier_uniform_(self.A, gain=1.5)
-        self.b = nn.Parameter(torch.zeros(F,))
+        self.stride = stride
         self.C = C
         self.F = F
-        self.k = k
         self.alpha_t = alpha
         self.biort = biort
-        if alpha == 'impulse':
-            self.alpha = nn.Parameter(
-                random_postconv_impulse(7*C, F), requires_grad=False)
+        if alpha == 'dct':
+            self.A1 = nn.Parameter(torch.zeros(F, C*7, 1, 1))
+            self.A2 = nn.Parameter(torch.zeros(F, C*7, 1, 1))
+            self.A3 = nn.Parameter(torch.zeros(F, C*7, 1, 1))
+            init.xavier_uniform_(self.A1)
+            init.xavier_uniform_(self.A2)
+            init.xavier_uniform_(self.A3)
+            self.b = nn.Parameter(torch.zeros(F))
+            lp, h, v = dct_bases()
+            self.alpha1 = nn.Parameter(lp, requires_grad=False)
+            self.alpha2 = nn.Parameter(h, requires_grad=False)
+            self.alpha3 = nn.Parameter(v, requires_grad=False)
             self.pad = 1
-        elif alpha == 'smooth':
-            self.alpha = nn.Parameter(
-                random_postconv_smooth(7*C, F, σ=1), requires_grad=False)
-            self.pad = 1
-        elif alpha == 'random':
-            self.alpha = nn.Parameter(
-                torch.randn(F, 7*C, 3, 3), requires_grad=False)
-            init.xavier_uniform(self.alpha)
-            self.pad = 1
-        elif alpha is None:
+        elif alpha == 'full':
+            self.A = nn.Parameter(torch.randn(F, 7*C, 3, 3))
+            self.b = nn.Parameter(torch.zeros(F,))
             self.alpha = 1
-            self.pad = (k-1) // 2
+            self.pad = 1
+            init.xavier_uniform_(self.A, gain=1.5)
         else:
-            raise ValueError
+            self.A = nn.Parameter(torch.randn(F, 7*C, 1, 1))
+            init.xavier_uniform_(self.A, gain=1.5)
+            self.b = nn.Parameter(torch.zeros(F,))
+            if alpha == 'impulse':
+                self.alpha = nn.Parameter(
+                    random_postconv_impulse(F, C*7), requires_grad=False)
+                self.pad = 1
+            elif alpha == 'smooth':
+                self.alpha = nn.Parameter(
+                    random_postconv_smooth(F, C*7, σ=1), requires_grad=False)
+                self.pad = 1
+            elif alpha == 'random':
+                self.alpha = nn.Parameter(
+                    torch.randn(F, 7*C, 3, 3), requires_grad=False)
+                init.xavier_uniform(self.alpha)
+                self.pad = 1
+            elif alpha is None:
+                self.alpha = 1
+                self.pad = 0
+            else:
+                raise ValueError
+
+    @property
+    def h(self):
+        if self.alpha_t == 'dct':
+            h = self.A1 * self.alpha1 + self.A2 * self.alpha2 + self.A3 * self.alpha3
+        else:
+            h = self.A * self.alpha
+        return h
+
 
     def forward(self, x):
         z = self.scat(x)
-        As = self.A * self.alpha
-        y = func.conv2d(z, As, self.b, padding=self.pad)
-        #  y = func.relu(y)
+        y = func.conv2d(z, self.h, self.b, padding=self.pad)
         if self.stride == 1:
             y = func.interpolate(y, scale_factor=2, mode='bilinear',
                                  align_corners=False)
         return y
 
     def extra_repr(self):
-        return '{}, {}, stride={}, k={}, alpha={}'.format(
-               self.C, self.F, self.stride, self.k, self.alpha_t)
+        return '{}, {}, stride={}, alpha={}'.format(
+               self.C, self.F, self.stride, self.alpha_t)
 
 
 class InvariantLayerj1_dct(nn.Module):
@@ -304,6 +333,62 @@ class ScatLayerj1(nn.Module):
         if not self.combine_colour:
             b, _, c, h, w = Z.shape
             Z = Z.view(b, 7*c, h, w)
+        return Z
+
+    def extra_repr(self):
+        return "biort='{}', mode='{}', magbias={}".format(
+               self.biort, self.mode_str, self.magbias)
+
+
+class ScatLayerj1a(nn.Module):
+    """ Does one order of scattering at a single scale. Can be made into a
+    second order scatternet by stacking two of these layers.
+
+    Inputs:
+        biort (str): the biorthogonal filters to use. if 'near_sym_b_bp' will
+            use the rotationally symmetric filters. These have 13 and 19 taps
+            so are quite long. They also require 7 1D convolutions instead of 6.
+        x (torch.tensor): Input of shape (N, C, H, W)
+        mode (str): padding mode. Can be 'symmetric' or 'zero'
+        magbias (float): the magnitude bias to use for smoothing
+        combine_colour (bool): if true, will only have colour lowpass and have
+            greyscale bandpass
+
+    Returns:
+        y (torch.tensor): y has the lowpass and invariant U terms stacked along
+            the channel dimension, and so has shape (N, 7*C, H/2, W/2). Where
+            the first C channels are the lowpass outputs, and the next 6C are
+            the magnitude highpass outputs.
+    """
+    def __init__(self, biort='near_sym_a', mode='symmetric', magbias=1e-2):
+        super().__init__()
+        self.biort = biort
+        # Have to convert the string to an int as the grad checks don't work
+        # with string inputs
+        self.mode_str = mode
+        self.mode = mode_to_int(mode)
+        self.magbias = magbias
+        h0o, _, h1o, _ = _biort(biort)
+        self.h0o = torch.nn.Parameter(prep_filt(h0o, 1), False)
+        self.h1o = torch.nn.Parameter(prep_filt(h1o, 1), False)
+        self.lp_pool = nn.MaxPool2d(2)
+
+    def forward(self, x):
+        # Do the single scale DTCWT
+        # If the row/col count of X is not divisible by 2 then we need to
+        # extend X
+        _, ch, r, c = x.shape
+        if r % 2 != 0:
+            x = torch.cat((x, x[:,:,-1:]), dim=2)
+        if c % 2 != 0:
+            x = torch.cat((x, x[:,:,:,-1:]), dim=3)
+
+        ll, r = ScatLayerj1_f.apply(
+            x, self.h0o, self.h1o, self.mode, self.magbias)
+        ll = self.lp_pool(ll)
+        Z = torch.cat((ll[:, None], r), dim=1)
+        b, _, c, h, w = Z.shape
+        Z = Z.view(b, 7*c, h, w)
         return Z
 
     def extra_repr(self):

@@ -2,27 +2,29 @@
 This script allows you to run a host of tests on the invariant layer and
 slightly different variants of it on CIFAR.
 """
-from shutil import copyfile
+from save_exp import save_experiment_info, save_acc
 import argparse
 import os
 import torch
 import torch.nn as nn
 import time
-from scatnet_learn.layers import InvariantLayerj1, ScatLayerj1, ScatLayerj2
-from scatnet_learn.layers import ScatLayerj2_corners, LogScale
+from scatnet_learn.layers import ScatLayerj1, ScatLayerj2, InvariantLayerj1
+#  from scatnet_learn.layers_dev import InvariantLayerj1
 import torch.nn.functional as func
 import numpy as np
-from math import ceil
 import random
 from collections import OrderedDict
 from scatnet_learn.data import cifar, tiny_imagenet
 from scatnet_learn import optim
 from tune_trainer import BaseClass, get_hms, net_init
 from tensorboardX import SummaryWriter
+import py3nvml
+from math import ceil
 
 # Training settings
 parser = argparse.ArgumentParser(description='PyTorch CIFAR Example')
 parser.add_argument('outdir', type=str, help='experiment directory')
+#  parser.add_argument('-C', type=int, default=64, help='number channels')
 parser.add_argument('--seed', type=int, default=None, metavar='S',
                     help='random seed (default: None)')
 parser.add_argument('--batch-size', type=int, default=128)
@@ -35,6 +37,8 @@ parser.add_argument('--dataset', default='cifar100', type=str,
                     choices=['cifar10', 'cifar100', 'tiny_imagenet'])
 parser.add_argument('--trainsize', default=-1, type=int,
                     help='size of training set')
+parser.add_argument('--resume', action='store_true',
+                    help='Rerun from a checkpoint')
 parser.add_argument('--no-comment', action='store_true',
                     help='Turns off prompt to enter comments about run.')
 parser.add_argument('--nsamples', type=int, default=0,
@@ -47,10 +51,18 @@ parser.add_argument('--num-gpus', type=float, default=0.5)
 parser.add_argument('--no-scheduler', action='store_true')
 parser.add_argument('--type', default=None, type=str, nargs='+',
                     help='''Model type(s) to build.''')
-parser.add_argument('--resume', action='store_true',
-                    help='resume from the last checkpoint in outdir')
 
 # Core hyperparameters
+#  parser.add_argument('--lr', default=0.5, type=float, help='learning rate')
+#  parser.add_argument('--lr1', default=None, type=float, help='learning rate for gainlayer')
+#  parser.add_argument('--mom', default=0.85, type=float, help='momentum')
+#  parser.add_argument('--mom1', default=None, type=float, help='momentum for gainlayer')
+#  parser.add_argument('--wd', default=1e-4, type=float, help='weight decay')
+#  parser.add_argument('--wd1', default=1e-5, type=float, help='l1 weight decay')
+parser.add_argument('--lr', default=None, type=float, help='learning rate')
+parser.add_argument('--wd', default=None, type=float, help='weight decay')
+parser.add_argument('--mom', default=None, type=float, help='momentum')
+parser.add_argument('--alpha', default=None, type=str)
 parser.add_argument('--reg', default='l2', type=str, help='regularization term')
 parser.add_argument('--steps', default=[60,80,100], type=int, nargs='+')
 parser.add_argument('--gamma', default=0.2, type=float, help='Lr decay')
@@ -71,41 +83,39 @@ nets = {'ref': [('conv', 3, 21, 0), ('pool', 1, None, None),
                 ('conv', 21, 147, 0), ('pool', 2, None, None),
                 ('conv', 147, 2*C, p), ('conv', 2*C, 2*C, p),
                 ('conv', 2*C, 4*C, p), ('conv', 4*C, 4*C, p)],
+        'ref2': [('conv', 3, 16, 0), ('conv', 16, 50, 0), ('pool', 1, None, None),
+                ('conv', 50, 147, 0), ('pool', 2, None, None),
+                ('conv', 147, 2*C, p), ('conv', 2*C, 2*C, p),
+                ('conv', 2*C, 4*C, p), ('conv', 4*C, 4*C, p)],
         'scatA':[('scat', 3, None, None), ('scat', 21, None, None),
-                 ('conv', 147, 2*C, p), ('conv', 2*C, 4*C, p),
-                 ('conv', 4*C, 4*C, p), ('conv', 4*C, 4*C, p)],
-        'scatA2':[('scatcolour', 3, None, None),
-                 ('conv', 51, 2*C, p), ('conv', 2*C, 4*C, p),
-                 ('conv', 4*C, 4*C, p), ('conv', 4*C, 4*C, p)],
-        'scatA3':[('scatcorner', 3, None, None),
-                 ('conv', 123, 2*C, p), ('conv', 2*C, 4*C, p),
-                 ('conv', 4*C, 4*C, p), ('conv', 4*C, 4*C, p)],
+                 ('conv', 147, 2*C, p), ('conv', 2*C, 2*C, p),
+                 ('conv', 2*C, 4*C, p), ('conv', 4*C, 4*C, p)],
         'scatB':[('inv', 3, 21, 2), ('inv', 21, 147, 2),
-                 ('conv', 147, 2*C, p), ('conv', 2*C, 4*C, p),
-                 ('conv', 4*C, 4*C, p), ('conv', 4*C, 4*C, p)],
+                 ('conv', 147, 2*C, p), ('conv', 2*C, 2*C, p),
+                 ('conv', 2*C, 4*C, p), ('conv', 4*C, 4*C, p)],
         'scatC':[('conv', 3, 16, 0),
                  ('scat', 16, None, None), ('scat', 16*7, None, None),
-                 ('conv', 16*49, 2*C, p), ('conv', 2*C, 4*C, p),
-                 ('conv', 4*C, 4*C, p), ('conv', 4*C, 4*C, p)],
+                 ('conv', 16*49, 2*C, p), ('conv', 2*C, 2*C, p),
+                 ('conv', 2*C, 4*C, p), ('conv', 4*C, 4*C, p)],
         'scatD':[('conv', 3, 16, 0),
                  ('inv', 16, 16*7, 2), ('inv', 16*7, 16*49, 2),
-                 ('conv', 16*49, 2*C, p), ('conv', 2*C, 4*C, p),
-                 ('conv', 4*C, 4*C, p), ('conv', 4*C, 4*C, p)],
+                 ('conv', 16*49, 2*C, p), ('conv', 2*C, 2*C, p),
+                 ('conv', 2*C, 4*C, p), ('conv', 4*C, 4*C, p)],
         'scatD1':[('conv', 3, 16, 0),
                   ('inv', 16, 50, 2), ('inv', 50, 147, 2),
-                  ('conv', 147, 2*C, p), ('conv', 2*C, 4*C, p),
-                  ('conv', 4*C, 4*C, p), ('conv', 4*C, 4*C, p)],
+                  ('conv', 147, 2*C, p), ('conv', 2*C, 2*C, p),
+                  ('conv', 2*C, 4*C, p), ('conv', 4*C, 4*C, p)],
         'scatD2':[('conv', 3, 16, 0),
                   ('inv', 16, 112, 2), ('inv', 112, 147, 2),
-                  ('conv', 147, 2*C, p), ('conv', 2*C, 4*C, p),
-                  ('conv', 4*C, 4*C, p), ('conv', 4*C, 4*C, p)],}
+                  ('conv', 147, 2*C, p), ('conv', 2*C, 2*C, p),
+                  ('conv', 2*C, 4*C, p), ('conv', 4*C, 4*C, p)],}
 
 
 class ScatNet(nn.Module):
     """ ScatNet is like a MixedNet but with a scattering front end (perhaps
     with learning between the layers)
     """
-    def __init__(self, dataset, type_, b=1e-2):
+    def __init__(self, dataset, type_, alpha=None, b=1e-2):
         super().__init__()
 
         # Define the number of scales and classes dependent on the dataset
@@ -140,18 +150,6 @@ class ScatNet(nn.Module):
             elif typ == 'pool':
                 name = 'pool' + str(C1)
                 blk = nn.MaxPool2d(2)
-            elif typ == 'scatcorner':
-                name = 'scat' + letter
-                blk = nn.Sequential(
-                    ScatLayerj2_corners(magbias=b, combine_colour=True),
-                    nn.BatchNorm2d(123), nn.ReLU())
-                layer += 1
-            elif typ == 'scatcolour':
-                name = 'scat' + letter
-                blk = nn.Sequential(
-                    ScatLayerj2(magbias=b, combine_colour=True),
-                    nn.BatchNorm2d(51), nn.ReLU())
-                layer += 1
             elif typ == 'scat':
                 name = 'scat' + letter
                 blk = nn.Sequential(
@@ -159,8 +157,9 @@ class ScatNet(nn.Module):
                 layer += 1
             elif typ == 'inv':
                 name = 'inv' + letter
-                blk = nn.Sequential(InvariantLayerj1(C1, C2, magbias=b),
-                                    nn.BatchNorm2d(C2), nn.ReLU())
+                blk = nn.Sequential(InvariantLayerj1(C1, C2, alpha=alpha, magbias=b),
+                                    nn.BatchNorm2d(C2),
+                                    nn.ReLU())
                 layer += 1
             # Add the name and block to the list
             blks.append((name, blk))
@@ -218,13 +217,16 @@ class TrainNET(BaseClass):
         vars(args).update(config)
         type_ = config.get('type')
         dataset = config.get('dataset', args.dataset)
+        num_gpus = config.get('num_gpus', args.num_gpus)
         if hasattr(args, 'verbose'):
             self._verbose = args.verbose
 
+        num_workers = 4
         if args.seed is not None:
             np.random.seed(args.seed)
             random.seed(args.seed)
             torch.manual_seed(args.seed)
+            num_workers = 0
             if self.use_cuda:
                 torch.cuda.manual_seed(args.seed)
         else:
@@ -232,19 +234,21 @@ class TrainNET(BaseClass):
 
         # ######################################################################
         #  Data
-        kwargs = {'num_workers': 4, 'pin_memory': True} if self.use_cuda else {}
+        kwargs = {'num_workers': num_workers, 'pin_memory': True} if self.use_cuda else {}
         if dataset.startswith('cifar'):
             self.train_loader, self.test_loader = cifar.get_data(
                 32, args.datadir, dataset=dataset,
                 batch_size=args.batch_size, trainsize=args.trainsize,
-                seed=args.seed, **kwargs)
-            θ = (0.5, 0.9, 1e-4, 1.5)
+                **kwargs)
+            #  θ = (0.5, 0.9, 1e-4, 1.5)
+            θ = (0.5, 0.85, 1e-4, 1.5)
         elif dataset == 'tiny_imagenet':
             self.train_loader, self.test_loader = tiny_imagenet.get_data(
                 64, args.datadir, val_only=False,
                 batch_size=args.batch_size, trainsize=args.trainsize,
-                seed=args.seed, distributed=False, **kwargs)
-            θ = (0.2, 0.9, 1e-4, 1.5)
+                distributed=False, **kwargs)
+            #  θ = (0.2, 0.9, 1e-4, 1.5)
+            θ = (0.5, 0.85, 8e-5, 1.5)
 
         # ######################################################################
         # Build the network based on the type parameter. θ are the optimal
@@ -256,15 +260,16 @@ class TrainNET(BaseClass):
         wd = config.get('wd', wd)
         std = config.get('std', std)
         bias = config.get('bias', 1e-2)
+        alpha = config.get('alpha', None)
         #  drop_p = config.get('drop_p', drop_p)
 
         # Build the network
-        self.model = ScatNet(args.dataset, type_, bias)
+        self.model = ScatNet(dataset, type_, alpha, bias)
         init = lambda x: net_init(x, std)
         self.model.apply(init)
 
         # Split across GPUs
-        if torch.cuda.device_count() > 1 and args.num_gpus > 1:
+        if torch.cuda.device_count() > 1 and num_gpus > 1:
             self.model = nn.DataParallel(self.model)
             model = self.model.module
         else:
@@ -294,30 +299,35 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.no_scheduler:
-        if not args.cpu:
-            import py3nvml
-            py3nvml.grab_gpus(ceil(args.num_gpus))
         # Create reporting objects
         args.verbose = True
-        outdir = os.path.join(os.environ['HOME'], 'nonray_results', args.outdir)
+        outdir = os.path.join(os.environ['HOME'], 'scat_results', args.outdir)
         tr_writer = SummaryWriter(os.path.join(outdir, 'train'))
         val_writer = SummaryWriter(os.path.join(outdir, 'val'))
         if not os.path.exists(outdir):
             os.mkdir(outdir)
-        # Copy this source file to the output directory for record keeping
-        copyfile(__file__, os.path.join(outdir, 'search.py'))
-        copyfile('tune_trainer.py', os.path.join(outdir, 'tune_trainer.py'))
-
         # Choose the model to run and build it
         if args.type is None:
             type_ = 'ref'
         else:
             type_ = args.type[0]
+        py3nvml.grab_gpus(ceil(args.num_gpus))
         cfg = {'args': args, 'type': type_, 'bias': 1e-2}
+        for option in ['lr', 'mom', 'wd', 'alpha']:
+            if getattr(args, option) is not None:
+                cfg[option] = getattr(args, option)
         trn = TrainNET(cfg)
         trn._final_epoch = args.epochs
+
+        # Copy this source file to the output directory for record keeping
         if args.resume:
             trn._restore(os.path.join(outdir, 'model_last.pth'))
+        else:
+            save_experiment_info(outdir, args.seed, args.no_comment, trn.model)
+
+        if args.seed is not None and trn.use_cuda:
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
 
         # Train for set number of epochs
         elapsed_time = 0
@@ -355,6 +365,7 @@ if __name__ == "__main__":
                   get_hms(elapsed_time) + (epoch_time,)))
             trn.step_lr()
 
+        save_acc(outdir, best_acc, acc)
     # We are using a scheduler
     else:
 
@@ -368,9 +379,9 @@ if __name__ == "__main__":
         if not os.path.exists(outdir):
             os.mkdir(outdir)
         # Copy this source file to the output directory for record keeping
-        copyfile(__file__, os.path.join(outdir, 'search.py'))
-        copyfile('tune_trainer.py', os.path.join(outdir, 'tune_trainer.py'))
+        save_experiment_info(outdir, args.seed, args.no_comment)
 
+        # Build the scheduler
         sched = AsyncHyperBandScheduler(
             time_attr="training_iteration",
             reward_attr="neg_mean_loss",
@@ -402,15 +413,12 @@ if __name__ == "__main__":
                     "checkpoint_at_end": True,
                     "config": {
                         "args": args,
-                        "type": tune.grid_search(type_),
+                        "type": tune.grid_search(['scatB', 'scatD', 'scatD1']),
+                        #  "alpha": tune.grid_search([None, 'impulse', 'dct', 'full']),
                         #  "bias": tune.grid_search([0, 1e-1, 1e-2, 1e-3]),
-                        #  "lr": tune.sample_from(
-                        #      lambda spec: np.random.uniform(0.1, 0.7)),
-                        #  "mom": tune.sample_from(
-                        #      lambda spec: m * spec.config.lr + b + \
-                        #      0.05*np.random.randn()),
-                        #  "wd": tune.sample_from(
-                        #      lambda spec: np.random.uniform(1e-5, 5e-4)),
+                        "lr": tune.grid_search([0.5]),
+                        "mom": tune.grid_search([0.75, 0.8, 0.85, 0.9]),
+                        #  "wd": tune.grid_search([8e-5, 1e-4, 2e-4])
                         #  "lr": tune.grid_search([0.0316, 0.1, 0.316, 1]),
                         #  "momentum": tune.grid_search([0.7, 0.8, 0.9]),
                         #  "wd": tune.grid_search([1e-5, 1e-4]),

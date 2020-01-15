@@ -122,6 +122,58 @@ class MagFn(torch.nn.Module):
             return y.view(s[0], s[1]*s[2], s[3], s[4])
 
 
+class ScatLayerj1a_f(torch.autograd.Function):
+    """ Function to do forward and backward passes of a single scattering
+    layer with the DTCWT biorthogonal filters. """
+
+    @staticmethod
+    def forward(ctx, x, h0o, h1o, mode, bias):
+        #  bias = 1e-2
+        #  bias = 0
+        ctx.in_shape = x.shape
+        batch, ch, r, c = x.shape
+        assert r % 2 == c % 2 == 0
+        mode = int_to_mode(mode)
+        ctx.mode = mode
+
+        ll, reals, imags = fwd_j1(x, h0o, h1o, False, 1, mode)
+        r = torch.sqrt(reals**2 + imags**2 + bias**2)
+
+        if x.requires_grad:
+            drdx = reals/r
+            drdy = imags/r
+            ctx.save_for_backward(h0o, h1o, drdx, drdy)
+        else:
+            z = x.new_zeros(1)
+            ctx.save_for_backward(h0o, h1o, z, z)
+
+        r = r - bias
+        del reals, imags
+        #  Z = torch.cat((ll[:, None], r), dim=1)
+
+        return ll, r
+
+    @staticmethod
+    def backward(ctx, dYl, dr):
+        dX = None
+        mode = ctx.mode
+
+        if ctx.needs_input_grad[0]:
+            #  h0o, h1o, θ = ctx.saved_tensors
+            h0o, h1o, drdx, drdy = ctx.saved_tensors
+            # Use the special properties of the filters to get the time reverse
+            h0o_t = h0o
+            h1o_t = h1o
+
+            # Level 1 backward (time reversed biorthogonal analysis filters)
+            reals = dr * drdx
+            imags = dr * drdy
+
+            dX = inv_j1(dYl, reals, imags, h0o_t, h1o_t, 1, 3, 4, mode)
+
+        return (dX,) + (None,) * 4
+
+
 class ScatLayerj1_f(torch.autograd.Function):
     """ Function to do forward and backward passes of a single scattering
     layer with the DTCWT biorthogonal filters. """

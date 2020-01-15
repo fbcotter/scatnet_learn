@@ -2,13 +2,13 @@
 This script allows you to run a host of tests on the invariant layer and
 slightly different variants of it on CIFAR.
 """
-from shutil import copyfile
+from save_exp import save_experiment_info, save_acc
 import argparse
 import os
 import torch
 import torch.nn as nn
 import time
-from scatnet_learn.layers import InvariantLayerj1, InvariantLayerj1_compress
+from scatnet_learn.layers import InvariantLayerj1
 import torch.nn.functional as func
 import numpy as np
 import random
@@ -17,10 +17,13 @@ from scatnet_learn.data import cifar, tiny_imagenet
 from scatnet_learn import optim
 from tune_trainer import BaseClass, get_hms, net_init
 from tensorboardX import SummaryWriter
+import py3nvml
+from math import ceil
 
 # Training settings
 parser = argparse.ArgumentParser(description='PyTorch CIFAR Example')
 parser.add_argument('outdir', type=str, help='experiment directory')
+#  parser.add_argument('-C', type=int, default=64, help='number channels')
 parser.add_argument('--seed', type=int, default=None, metavar='S',
                     help='random seed (default: None)')
 parser.add_argument('--batch-size', type=int, default=128)
@@ -33,6 +36,8 @@ parser.add_argument('--dataset', default='cifar100', type=str,
                     choices=['cifar10', 'cifar100', 'tiny_imagenet'])
 parser.add_argument('--trainsize', default=-1, type=int,
                     help='size of training set')
+parser.add_argument('--resume', action='store_true',
+                    help='Rerun from a checkpoint')
 parser.add_argument('--no-comment', action='store_true',
                     help='Turns off prompt to enter comments about run.')
 parser.add_argument('--nsamples', type=int, default=0,
@@ -45,8 +50,6 @@ parser.add_argument('--num-gpus', type=float, default=0.5)
 parser.add_argument('--no-scheduler', action='store_true')
 parser.add_argument('--type', default=None, type=str, nargs='+',
                     help='''Model type(s) to build.''')
-parser.add_argument('--resume', action='store_true',
-                    help='resume from the last checkpoint in outdir')
 
 # Core hyperparameters
 parser.add_argument('--reg', default='l2', type=str, help='regularization term')
@@ -133,7 +136,7 @@ allnets = {
 }
 
 
-class MixedNet(nn.Module)
+class MixedNet(nn.Module):
     """ MixedNet allows custom definition of conv/inv layers as you would
     a normal network. You can change the ordering below to suit your
     task
@@ -211,8 +214,8 @@ class MixedNet(nn.Module)
                 nn.BatchNorm2d(2*C2), nn.ReLU())
             blks = blks + [
                 ('pool3', blk1),
-                ('convG', blk2),
-                ('convH', blk3)]
+                ('convH', blk2),
+                ('convI', blk3)]
             self.net = nn.Sequential(OrderedDict(blks))
             self.avg = nn.AvgPool2d(8)
             self.fc1 = nn.Linear(2*C2, self.num_classes)
@@ -249,29 +252,34 @@ class TrainNET(BaseClass):
         vars(args).update(config)
         type_ = config.get('type')
         dataset = config.get('dataset', args.dataset)
+        num_gpus = config.get('num_gpus', args.num_gpus)
         if hasattr(args, 'verbose'):
             self._verbose = args.verbose
 
+        num_workers = 4
         if args.seed is not None:
             np.random.seed(args.seed)
             random.seed(args.seed)
             torch.manual_seed(args.seed)
+            num_workers = 0
             if self.use_cuda:
                 torch.cuda.manual_seed(args.seed)
+        else:
+            args.seed = random.randint(0, 10000)
 
         # ######################################################################
         #  Data
-        kwargs = {'num_workers': 4, 'pin_memory': True} if self.use_cuda else {}
+        kwargs = {'num_workers': num_workers, 'pin_memory': True} if self.use_cuda else {}
         if dataset.startswith('cifar'):
             self.train_loader, self.test_loader = cifar.get_data(
                 32, args.datadir, dataset=dataset,
                 batch_size=args.batch_size, trainsize=args.trainsize,
-                seed=args.seed, **kwargs)
+                **kwargs)
         elif dataset == 'tiny_imagenet':
             self.train_loader, self.test_loader = tiny_imagenet.get_data(
                 64, args.datadir, val_only=False,
                 batch_size=args.batch_size, trainsize=args.trainsize,
-                seed=args.seed, distributed=False, **kwargs)
+                distributed=False, **kwargs)
 
         # ######################################################################
         # Build the network based on the type parameter. θ are the optimal
@@ -303,7 +311,7 @@ class TrainNET(BaseClass):
         self.model.apply(init)
 
         # Split across GPUs
-        if torch.cuda.device_count() > 1 and args.num_gpus > 1:
+        if torch.cuda.device_count() > 1 and num_gpus > 1:
             self.model = nn.DataParallel(self.model)
             model = self.model.module
         else:
@@ -356,25 +364,30 @@ if __name__ == "__main__":
     if args.no_scheduler:
         # Create reporting objects
         args.verbose = True
-        outdir = os.path.join(os.environ['HOME'], 'nonray_results', args.outdir)
+        outdir = os.path.join(os.environ['HOME'], 'inv_results', args.outdir)
         tr_writer = SummaryWriter(os.path.join(outdir, 'train'))
         val_writer = SummaryWriter(os.path.join(outdir, 'val'))
         if not os.path.exists(outdir):
             os.mkdir(outdir)
-        # Copy this source file to the output directory for record keeping
-        copyfile(__file__, os.path.join(outdir, 'search.py'))
-        copyfile('tune_trainer.py', os.path.join(outdir, 'tune_trainer.py'))
-
         # Choose the model to run and build it
         if args.type is None:
             type_ = 'ref'
         else:
             type_ = args.type[0]
+        py3nvml.grab_gpus(ceil(args.num_gpus))
         cfg = {'args': args, 'type': type_}
         trn = TrainNET(cfg)
         trn._final_epoch = args.epochs
+
+        # Copy this source file to the output directory for record keeping
         if args.resume:
             trn._restore(os.path.join(outdir, 'model_last.pth'))
+        else:
+            save_experiment_info(outdir, args.seed, args.no_comment, trn.model)
+
+        if args.seed is not None and trn.use_cuda:
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
 
         # Train for set number of epochs
         elapsed_time = 0
@@ -410,9 +423,10 @@ if __name__ == "__main__":
             elapsed_time += epoch_time
             print('| Elapsed time : %d:%02d:%02d\t Epoch time: %.1fs' % (
                   get_hms(elapsed_time) + (epoch_time,)))
-            # Update the scheduler
             trn.step_lr()
 
+        save_acc(outdir, best_acc, acc)
+    # We are using a scheduler
     else:
 
         args.verbose = False
@@ -425,9 +439,9 @@ if __name__ == "__main__":
         if not os.path.exists(outdir):
             os.mkdir(outdir)
         # Copy this source file to the output directory for record keeping
-        copyfile(__file__, os.path.join(outdir, 'search.py'))
-        copyfile('tune_trainer.py', os.path.join(outdir, 'tune_trainer.py'))
+        save_experiment_info(outdir, args.seed, args.no_comment)
 
+        # Build the scheduler
         sched = AsyncHyperBandScheduler(
             time_attr="training_iteration",
             reward_attr="neg_mean_loss",
@@ -469,6 +483,7 @@ if __name__ == "__main__":
                     "config": {
                         "args": args,
                         "type": tune.grid_search(type_),
+                        "wd": 2e-4,
                         #  "lr": tune.sample_from(lambda spec: np.random.uniform(
                             #  0.1, 0.7
                         #  )),

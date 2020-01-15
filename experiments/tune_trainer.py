@@ -12,6 +12,7 @@ import numpy as np
 import torch
 import sys
 import os
+from math import sqrt
 
 import torch.nn.init as init
 
@@ -20,7 +21,7 @@ def net_init(m, gain=1):
     """ Function to initialize the networks. Needed by all experiments """
     classname = m.__class__.__name__
     if (classname.find('Conv') != -1) or (classname.find('Linear') != -1):
-        init.xavier_uniform_(m.weight, gain=np.sqrt(2))
+        init.xavier_uniform_(m.weight, gain=sqrt(2))
         try:
             init.constant_(m.bias, 0)
         # Can get an attribute error if no bias to learn
@@ -31,7 +32,8 @@ def net_init(m, gain=1):
         init.xavier_uniform_(m.A2, gain=gain)
         init.xavier_uniform_(m.A3, gain=gain)
     elif classname.find('InvariantLayerj1') != -1:
-        init.xavier_uniform_(m.A, gain=gain)
+        #  init.xavier_uniform_(m.A, gain=gain)
+        pass
 
 
 def get_hms(seconds):
@@ -126,7 +128,7 @@ class BaseClass(Trainable):
         update = 0
         epoch = 0
         num_iter = len(self.train_loader)
-        et = time.time()
+        start = time.time()
         update_steps = np.linspace(
             int(1/4 * num_iter), num_iter-1, 4).astype('int')
 
@@ -137,6 +139,9 @@ class BaseClass(Trainable):
 
             output = self.model(data)
             loss = func.nll_loss(output, target)
+            if torch.isnan(loss):
+                raise ValueError(
+                    "Nan found in training at epoch {}".format(self.last_epoch))
             loss.backward()
             self.opt_step()
 
@@ -155,12 +160,14 @@ class BaseClass(Trainable):
 
                 sys.stdout.write('\r')
                 sys.stdout.write(
-                    '| Epoch [{:3d}/{:3d}] Iter[{:3d}/{:3d}]\t\tLoss: {:.4f}\t'
-                    'Acc@1: {:.2f}%\tAcc@5: {:.2f}%\tTime: '
-                    '{:.1f}min'.format(
+                    '| Epoch [{:3d}/{:3d}] Iter[{:3d}/{:3d}]\t\t'
+                    'Loss: {:.4f}\tAcc@1: {:.3f}%\tAcc@5: {:.3f}%\t'
+                    'Elapsed Time: {:.1f}min'.format(
                         self.last_epoch, self.final_epoch, batch_idx+1,
-                        num_iter, loss_update/update, 100. * top1_update/update,
-                        100. * top5_update/update, (time.time()-et)/60))
+                        num_iter, loss_update/update,
+                        100. * top1_update/update,
+                        100. * top5_update/update,
+                        (time.time()-start)/60))
                 sys.stdout.flush()
                 # Every update_steps, print a new line
                 if batch_idx in update_steps:
